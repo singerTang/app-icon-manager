@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>应用 icon 管理端</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg></span>
+      <div>
+        <h1>应用 icon 管理端</h1>
+        <p class="subtitle">统一管理应用图标与 SVG 符号库</p>
+      </div>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <!-- 左侧文件夹树 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-title">文件夹</span>
+        <div class="sidebar-head-btns">
+          <button class="btn-icon" id="btn-new-folder" title="新建文件夹"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="btn-icon" id="btn-sidebar-toggle" title="收起/展开侧栏"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+        </div>
+      </div>
+      <ul id="folder-tree" class="folder-tree">
+        <li class="folder-item active" data-id="">
+          <span class="folder-icon"><svg class="icon" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></span>
+          <span class="folder-name">全部图标</span>
+        </li>
+      </ul>
+      <div class="sidebar-foot" id="sidebar-foot">
+        <span class="sidebar-foot-icon"><svg class="icon" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></span>
+        <span class="sidebar-foot-text">共 <b id="sidebar-total">0</b> 个图标</span>
+      </div>
+    </aside>
+
+    <!-- 右侧内容区 -->
+    <div class="content">
+      <section class="toolbar">
+        <div class="toolbar-row toolbar-row-main">
+          <input id="search" type="search" class="search" placeholder="搜索名称、标签、描述…" />
+          <div class="filters">
+            <select id="filter-type" class="select">
+              <option value="">全部类型</option>
+              <option value="app">应用图标</option>
+              <option value="symbol">SVG 符号</option>
+            </select>
+            <select id="filter-category" class="select">
+              <option value="">全部分类</option>
+            </select>
+          </div>
+          <div class="toolbar-btns">
+            <button id="btn-batch" class="btn btn-ghost"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>批量上传</button>
+            <button id="btn-zip" class="btn btn-ghost"><svg class="icon" viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>导入 ZIP</button>
+          </div>
+          <div class="view-toggle" role="group" aria-label="展示方式">
+            <button id="view-grid" class="view-btn active" type="button" title="网格视图"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
+            <button id="view-list" class="view-btn" type="button" title="列表视图"><svg class="icon" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+          </div>
+          <button id="btn-add" class="btn btn-primary" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新增图标</button>
+        </div>
+        <div class="toolbar-row toolbar-row-batch">
+          <div id="batch-actions" class="batch-actions">
+            <span id="batch-selected-count" class="batch-selected-count">已选 0 个</span>
+            <button id="btn-batch-toggle-all" class="btn btn-ghost" type="button">全选当前页</button>
+            <select id="batch-folder-select" class="select batch-folder-select">
+              <option value="">无文件夹</option>
+            </select>
+            <button id="btn-batch-move" class="btn btn-ghost" type="button">迁移</button>
+            <button id="btn-batch-download" class="btn btn-ghost" type="button">批量下载</button>
+            <button id="btn-batch-delete" class="btn btn-ghost btn-danger-soft" type="button">删除</button>
+            <button id="btn-batch-clear" class="btn btn-ghost" type="button">清空</button>
+          </div>
+          <div class="stat" id="stat"></div>
+        </div>
+      </section>
+
+      <!-- 拖拽感知容器 -->
+      <div id="drop-zone" class="drop-zone">
+        <div id="drop-hint" class="drop-hint" hidden>
+          <div class="drop-hint-box">
+            <div class="drop-hint-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></div>
+            <div>拖入图片或 ZIP 文件批量上传</div>
+          </div>
+        </div>
+        <main id="grid" class="grid"></main>
+        <div id="empty" class="empty" hidden>暂无图标，点击右上角「新增图标」或将图片拖拽至此开始。</div>
+      </div>
+
+      <!-- 分页栏 -->
+      <footer id="pagination" class="pagination" hidden>
+        <div class="pagination-size">
+          每页
+          <select id="page-size" class="select">
+            <option value="30">30</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+          条
+        </div>
+        <div class="pagination-nav">
+          <button id="page-prev" class="btn btn-ghost" type="button">上一页</button>
+          <span id="page-info" class="page-info"></span>
+          <button id="page-next" class="btn btn-ghost" type="button">下一页</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 新增/编辑弹窗 -->
+  <div id="modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="modal-title">新增图标</h2>
+        <button class="modal-close" id="modal-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <form id="icon-form" class="form">
+        <input type="hidden" id="f-id" />
+        <div class="form-row">
+          <label>名称 <span class="req">*</span></label>
+          <input id="f-name" type="text" required placeholder="例如：微信、设置图标" />
+        </div>
+        <div class="form-grid">
+          <div class="form-row">
+            <label>类型</label>
+            <select id="f-type">
+              <option value="app">应用图标</option>
+              <option value="symbol">SVG 符号</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>版本</label>
+            <input id="f-version" type="text" placeholder="1.0.0" />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-row">
+            <label>文件夹</label>
+            <select id="f-folder">
+              <option value="">不归属任何文件夹</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>分类</label>
+            <input id="f-category" type="text" list="cat-list" placeholder="例如：社交 / 工具" />
+            <datalist id="cat-list"></datalist>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>标签（逗号分隔）</label>
+          <input id="f-tags" type="text" placeholder="蓝色, 圆角" />
+        </div>
+        <div class="form-row">
+          <label>描述</label>
+          <textarea id="f-description" rows="2" placeholder="选填备注"></textarea>
+        </div>
+        <div class="form-row">
+          <label>图标文件（图片或 SVG，≤5MB）</label>
+          <input id="f-file" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.ico" />
+          <p class="hint" id="file-hint">编辑时不选择文件则保留原图标</p>
+        </div>
+        <div class="preview-box">
+          <div id="preview" class="preview">预览</div>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-ghost" id="form-cancel">取消</button>
+          <button type="submit" class="btn btn-primary" id="form-submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 大图预览弹窗 -->
+  <div id="viewer" class="modal" hidden>
+    <div class="viewer-card">
+      <button class="modal-close" id="viewer-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      <div id="viewer-body" class="viewer-body"></div>
+      <div id="viewer-meta" class="viewer-meta"></div>
+      <div class="viewer-actions" id="viewer-actions"></div>
+    </div>
+  </div>
+
+  <!-- 文件夹重命名弹窗 -->
+  <div id="folder-modal" class="modal" hidden>
+    <div class="modal-card" style="width:360px">
+      <div class="modal-head">
+        <h2 id="folder-modal-title">新建文件夹</h2>
+        <button class="modal-close" id="folder-modal-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div class="form" style="padding:20px 22px">
+        <div class="form-row">
+          <label>文件夹名称</label>
+          <input id="folder-name-input" type="text" placeholder="请输入名称" />
+        </div>
+        <div class="form-actions" style="margin-top:16px">
+          <button type="button" class="btn btn-ghost" id="folder-cancel">取消</button>
+          <button type="button" class="btn btn-primary" id="folder-confirm">确认</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量上传进度弹窗 -->
+  <div id="batch-modal" class="modal" hidden>
+    <div class="modal-card" style="width:400px">
+      <div class="modal-head">
+        <h2>批量上传</h2>
+        <button class="modal-close" id="batch-modal-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div class="form" style="padding:20px 22px">
+        <div id="batch-progress-list" class="batch-list"></div>
+        <div id="batch-summary" class="batch-summary"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 隐藏的文件输入 -->
+  <input id="batch-file" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.ico" multiple hidden />
+  <input id="zip-file" type="file" accept=".zip" hidden />
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

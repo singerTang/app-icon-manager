@@ -1,0 +1,10 @@
+node_modules/
+data/
+uploads/
+*.log
+.DS_Store
+
+# 测试运行产物（Playwright 报告与结果）
+test-results/
+test/e2e/report/
+playwright-report/

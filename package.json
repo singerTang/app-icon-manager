@@ -1,0 +1,31 @@
+{
+  "name": "app-icon-manager",
+  "version": "1.0.0",
+  "description": "应用 icon 管理端：管理应用图标与 SVG 符号库",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test:unit": "node --test test/api.test.js",
+    "test:e2e": "npx playwright test",
+    "cypress:open": "cypress open",
+    "cypress:run": "cypress run",
+    "test": "npm run test:unit && npm run test:frontend",
+    "test:frontend": "node --test test/frontend-static.test.js"
+  },
+  "keywords": [
+    "icon",
+    "manager",
+    "svg"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.5.17",
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "multer": "^2.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "cypress": "^15.18.0"
+  }
+}
