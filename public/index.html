@@ -27,12 +27,8 @@
           <button class="btn-icon" id="btn-sidebar-toggle" title="收起/展开侧栏"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
         </div>
       </div>
-      <ul id="folder-tree" class="folder-tree">
-        <li class="folder-item active" data-id="">
-          <span class="folder-icon"><svg class="icon" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></span>
-          <span class="folder-name">全部图标</span>
-        </li>
-      </ul>
+      <!-- 文件夹树由 app.js 的 renderFolderTree() 动态渲染 -->
+      <ul id="folder-tree" class="folder-tree"></ul>
       <div class="sidebar-foot" id="sidebar-foot">
         <span class="sidebar-foot-icon"><svg class="icon" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></span>
         <span class="sidebar-foot-text">共 <b id="sidebar-total">0</b> 个图标</span>

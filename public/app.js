@@ -81,6 +81,7 @@ let debounceTimer = null;
 let currentFolderId = null;        // null = 全部图标
 let folderModalCallback = null;    // resolve({ name }) 或 null
 let allFolders = [];               // 最近一次从 API 获取的文件夹列表
+let collapsedFolders = new Set();  // 已折叠的文件夹 id，重渲染时保持折叠状态
 let dragCounter = 0;               // 拖拽进入计数，防止子元素触发闪烁
 let selectedIconIds = new Set();    // 当前列表中已勾选的图标 id
 let currentPage = 1;               // 当前页码
@@ -95,7 +96,27 @@ function esc(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
+// 统一 fetch 封装：检查 res.ok、解析 JSON，失败时抛出可读错误
+async function apiFetch(url, opts) {
+  let res;
+  try {
+    res = await fetch(url, opts);
+  } catch (_) {
+    throw new Error('网络请求失败，请检查连接');
+  }
+  let data = null;
+  const text = await res.text();
+  if (text) {
+    try { data = JSON.parse(text); } catch (_) { /* 非 JSON 响应 */ }
+  }
+  if (!res.ok) {
+    throw new Error((data && data.error) || `请求失败（${res.status}）`);
+  }
+  return data;
 }
 
 function toast(msg, isError) {
@@ -226,18 +247,21 @@ function renderTreeNodes(parentEl, parentId, folders, depth) {
   );
   if (!children.length) return;
 
-  let container = parentEl;
-  if (depth > 0) {
-    container = document.createElement('ul');
-    parentEl.appendChild(container);
-  }
-
   for (const folder of children) {
-    const li = document.createElement('li');
-    li.className = 'folder-item' + (currentFolderId === folder.id ? ' active' : '');
-    li.dataset.id = folder.id;
-    li.title = folder.name;
-    li.innerHTML = `
+    const hasChildren = folders.some((f) => f.parent_id === folder.id);
+    const collapsed = collapsedFolders.has(folder.id);
+
+    // 节点容器：承载「行内容 + 子级列表」，避免子 ul 被当作行的 flex 子项横排
+    const node = document.createElement('li');
+    node.className = 'folder-node' + (collapsed ? ' collapsed' : '');
+
+    const row = document.createElement('div');
+    row.className = 'folder-item' + (currentFolderId === folder.id ? ' active' : '');
+    row.dataset.id = folder.id;
+    row.title = folder.name;
+    row.style.setProperty('--depth', depth);
+    row.innerHTML = `
+      <span class="folder-toggle">${hasChildren ? ICONS.chevronRight : ''}</span>
       <span class="folder-icon">${ICONS.folder}</span>
       <span class="folder-name">${esc(folder.name)}</span>
       <span class="folder-count">${folder.icon_count || 0}</span>
@@ -247,25 +271,58 @@ function renderTreeNodes(parentEl, parentId, folders, depth) {
         <button class="folder-action-btn" data-action="delete" title="删除">${ICONS.trash}</button>
       </span>
     `;
-    li.querySelector('.folder-name').addEventListener('click', () => selectFolder(folder.id));
-    li.querySelector('[data-action="rename"]').addEventListener('click', (e) => {
+    if (hasChildren) {
+      row.querySelector('.folder-toggle').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFolder(folder.id);
+      });
+    }
+    row.querySelector('.folder-name').addEventListener('click', () => selectFolder(folder.id));
+    row.querySelector('[data-action="rename"]').addEventListener('click', (e) => {
       e.stopPropagation();
       promptFolderModal('重命名文件夹', folder.name).then((name) => {
         if (name) renameFolder(folder.id, name);
       });
     });
-    li.querySelector('[data-action="add-sub"]').addEventListener('click', (e) => {
+    row.querySelector('[data-action="add-sub"]').addEventListener('click', (e) => {
       e.stopPropagation();
       promptFolderModal('新建子文件夹').then((name) => {
-        if (name) createFolder(name, folder.id);
+        if (name) {
+          collapsedFolders.delete(folder.id); // 新建后展开父级，确保新子级可见
+          createFolder(name, folder.id);
+        }
       });
     });
-    li.querySelector('[data-action="delete"]').addEventListener('click', (e) => {
+    row.querySelector('[data-action="delete"]').addEventListener('click', (e) => {
       e.stopPropagation();
       deleteFolder(folder.id, folder.name);
     });
-    container.appendChild(li);
-    renderTreeNodes(li, folder.id, folders, depth + 1);
+    node.appendChild(row);
+
+    if (hasChildren) {
+      const childUl = document.createElement('ul');
+      childUl.className = 'folder-children';
+      node.appendChild(childUl);
+      renderTreeNodes(childUl, folder.id, folders, depth + 1);
+    }
+    parentEl.appendChild(node);
+  }
+}
+
+// 切换文件夹折叠状态：仅更新对应节点的 class，避免全量重建整棵树
+function toggleFolder(id) {
+  const collapsed = collapsedFolders.has(id);
+  if (collapsed) {
+    collapsedFolders.delete(id);
+  } else {
+    collapsedFolders.add(id);
+  }
+  const row = folderTree.querySelector(`.folder-item[data-id="${id}"]`);
+  const node = row && row.closest('.folder-node');
+  if (node) {
+    node.classList.toggle('collapsed', !collapsed);
+  } else {
+    renderFolderTree(); // 兜底：找不到节点时回退全量渲染
   }
 }
 
@@ -304,7 +361,9 @@ document.getElementById('folder-confirm').addEventListener('click', () => {
 document.getElementById('folder-cancel').addEventListener('click', () => closeFolderModal(null));
 document.getElementById('folder-modal-close').addEventListener('click', () => closeFolderModal(null));
 
-folderNameInput.addEventListener('keydown', (e) => {
+// 键盘事件绑定到弹窗容器，并以 hidden 状态守卫，避免关闭后误触发
+folderModal.addEventListener('keydown', (e) => {
+  if (folderModal.hidden) return;
   if (e.key === 'Enter') {
     const name = folderNameInput.value.trim();
     closeFolderModal(name || null);
@@ -351,6 +410,7 @@ async function deleteFolder(id, name) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '删除失败');
     if (currentFolderId === id) currentFolderId = null;
+    collapsedFolders.delete(id); // 清理折叠状态，避免残留 id 与未来新建文件夹碰撞
     toast('已删除文件夹');
     await loadFolders();
     await loadIcons();
@@ -391,8 +451,13 @@ async function loadIcons() {
   if (currentFolderId !== null) {
     params.set('folder_id', currentFolderId);
   }
-  const res = await fetch(`${API}?${params}`);
-  const data = await res.json();
+  let data;
+  try {
+    data = await apiFetch(`${API}?${params}`);
+  } catch (err) {
+    toast(err.message, true);
+    return;
+  }
   const icons = data.icons;
   totalCount = data.total;
   // 服务端可能因越界回退页码，以返回值为准
@@ -553,10 +618,11 @@ async function downloadSelectedIcons() {
     const a = document.createElement('a');
     a.href = url;
     a.download = '图标打包.zip';
+    a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    // 延迟回收：避免部分浏览器在下载排队前就移除节点或撤销 ObjectURL
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
     toast(`已打包下载 ${ids.length} 个图标`);
   } catch (err) {
     toast(err.message, true);

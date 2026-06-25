@@ -265,11 +265,17 @@ body {
   flex: 1;
 }
 
+.folder-node { list-style: none; }
+.folder-children { list-style: none; margin: 0; padding: 0; }
+.folder-node.collapsed > .folder-children { display: none; }
+
 .folder-item {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
+  /* 按层级深度缩进，--depth 由 JS 设置 */
+  padding-left: calc(10px + var(--depth, 0) * 16px);
   margin-bottom: 2px;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -277,6 +283,20 @@ body {
   user-select: none;
   position: relative;
 }
+
+/* 折叠箭头：有子级时显示，展开态旋转 90 度 */
+.folder-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex-shrink: 0;
+  color: var(--muted-2);
+  cursor: pointer;
+  transition: transform 0.12s;
+}
+.folder-toggle .icon { width: 14px; height: 14px; }
+.folder-node:not(.collapsed) > .folder-item .folder-toggle { transform: rotate(90deg); }
 
 .folder-item:hover { background: var(--surface-2); }
 

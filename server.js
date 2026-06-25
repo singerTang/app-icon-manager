@@ -78,7 +78,9 @@ const upload = multer({
     if (ALLOWED_EXT.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('不支持的文件类型，仅允许图片或 SVG'));
+      const e = new Error('不支持的文件类型，仅允许图片或 SVG');
+      e.status = 400; // 标记为客户端错误，便于统一中间件返回 400
+      cb(e);
     }
   },
 });
@@ -95,7 +97,9 @@ const uploadZip = multer({
     if (ext === '.zip') {
       cb(null, true);
     } else {
-      cb(new Error('请上传 .zip 格式的文件'));
+      const e = new Error('请上传 .zip 格式的文件');
+      e.status = 400; // 标记为客户端错误，便于统一中间件返回 400
+      cb(e);
     }
   },
 });
@@ -184,15 +188,20 @@ app.put('/api/folders/:id', (req, res) => {
   res.json(db.prepare('SELECT * FROM folders WHERE id = ?').get(id));
 });
 
-// 删除文件夹（图标 folder_id 置 NULL，子文件夹 parent_id 置 NULL 变为根级）
+// 删除文件夹（仅允许删除无子文件夹的节点，图标 folder_id 置 NULL 移至全部图标）
 app.delete('/api/folders/:id', (req, res) => {
   const id = Number(req.params.id);
   const existing = db.prepare('SELECT id FROM folders WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: '文件夹不存在' });
 
+  // 有子文件夹时禁止删除，避免子级被静默提升为根级
+  const childCount = db.prepare('SELECT COUNT(*) AS n FROM folders WHERE parent_id = ?').get(id).n;
+  if (childCount > 0) {
+    return res.status(409).json({ error: '该文件夹下有子文件夹，请先删除子文件夹' });
+  }
+
   db.transaction(() => {
     db.prepare('UPDATE icons SET folder_id = NULL WHERE folder_id = ?').run(id);
-    db.prepare('UPDATE folders SET parent_id = NULL WHERE parent_id = ?').run(id);
     db.prepare('DELETE FROM folders WHERE id = ?').run(id);
   })();
   res.json({ success: true });
@@ -249,21 +258,28 @@ app.post('/api/icons/batch-zip', uploadZip.single('zipfile'), (req, res) => {
        VALUES (?, ?, '', '', ?, ?, '', '1.0.0', ?, ?, ?)`
     );
 
+    // 先完成所有磁盘写入（同步 I/O 不放入事务，避免阻塞期间持锁）
+    const records = [];
+    entries.forEach((entry, i) => {
+      if (entry.isDirectory) return;
+      const entryName = decodeZipEntryName(entry);
+      const ext = path.extname(entryName).toLowerCase();
+      if (!ALLOWED_EXT.includes(ext)) { skipped += 1; return; }
+
+      const baseName = path.basename(entryName, ext);
+      // 加入循环下标，避免同一毫秒内多文件名碰撞导致互相覆盖
+      const filename = `${Date.now()}_${i}_${baseName.replace(/[^\w一-龥-]/g, '_').slice(0, 50)}${ext}`;
+      const destPath = path.join(uploadDir, filename);
+      fs.writeFileSync(destPath, entry.getData());
+
+      records.push({ baseName, iconType: ext === '.svg' ? 'symbol' : 'app', filename, ext });
+    });
+
+    // 再在单个事务内批量入库
+    const ts = now();
     db.transaction(() => {
-      for (const entry of entries) {
-        if (entry.isDirectory) continue;
-        const entryName = decodeZipEntryName(entry);
-        const ext = path.extname(entryName).toLowerCase();
-        if (!ALLOWED_EXT.includes(ext)) { skipped += 1; continue; }
-
-        const baseName = path.basename(entryName, ext);
-        const filename = `${Date.now()}_${baseName.replace(/[^\w一-龥-]/g, '_').slice(0, 50)}${ext}`;
-        const destPath = path.join(uploadDir, filename);
-        fs.writeFileSync(destPath, entry.getData());
-
-        const iconType = ext === '.svg' ? 'symbol' : 'app';
-        const ts = now();
-        insert.run(baseName, iconType, `/uploads/${filename}`, ext.slice(1), folder_id, ts, ts);
+      for (const r of records) {
+        insert.run(r.baseName, r.iconType, `/uploads/${r.filename}`, r.ext.slice(1), folder_id, ts, ts);
         added += 1;
       }
     })();
@@ -583,10 +599,15 @@ app.post('/api/import', (req, res) => {
   res.json({ success: true, added });
 });
 
-// 统一错误处理（含 multer 文件类型/大小错误）
+// 统一错误处理：区分客户端错误（400）与服务端错误（500）
 app.use((err, req, res, next) => {
-  console.error('请求出错:', err.message);
-  res.status(400).json({ error: err.message || '服务器内部错误' });
+  console.error('请求出错:', err.stack || err.message);
+  // multer 文件错误、或显式标记 status=400 的错误视为客户端错误
+  const isClientError = err instanceof multer.MulterError || err.status === 400;
+  if (isClientError) {
+    return res.status(400).json({ error: err.message || '请求参数错误' });
+  }
+  res.status(500).json({ error: '服务器内部错误' });
 });
 
 const server = app.listen(PORT, () => {

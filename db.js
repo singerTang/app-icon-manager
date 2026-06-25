@@ -58,12 +58,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 `);
 
-// 兼容旧库：为 icons 表追加 folder_id 列（SQLite 不支持 IF NOT EXISTS）
-try {
+// 兼容旧库：为 icons 表追加 folder_id 列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）
+// 用 PRAGMA 显式检查列是否存在，避免用 try/catch 吞掉真实的数据库错误
+const hasFolderCol = db
+  .prepare('PRAGMA table_info(icons)')
+  .all()
+  .some((col) => col.name === 'folder_id');
+if (!hasFolderCol) {
   db.exec(`
     ALTER TABLE icons ADD COLUMN folder_id INTEGER DEFAULT NULL;
     CREATE INDEX IF NOT EXISTS idx_icons_folder ON icons(folder_id);
   `);
-} catch (_) { /* 列已存在，忽略 */ }
+}
 
 module.exports = db;

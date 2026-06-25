@@ -1,0 +1,27 @@
+# 构建上下文排除项：避免拷入宿主机产物与无关文件
+# 关键：node_modules 必须排除（宿主机为 Windows，原生模块二进制不兼容）
+node_modules
+npm-debug.log
+
+# 运行时数据（通过 volume 挂载，不进镜像）
+data
+uploads
+
+# 测试与开发产物
+test
+test-results
+cypress
+cypress.config.js
+playwright.config.js
+
+# 版本控制与文档
+.git
+.gitignore
+.github
+docs
+.claude
+
+# Docker 自身文件
+Dockerfile
+docker-compose.yml
+.dockerignore
