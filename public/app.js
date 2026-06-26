@@ -11,6 +11,7 @@ const ICONS = {
   trash: '<svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   chevronLeft: '<svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>',
   chevronRight: '<svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
+  check: '<svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
 };
 
 // DOM 引用
@@ -34,7 +35,19 @@ const fTags = document.getElementById('f-tags');
 const fDescription = document.getElementById('f-description');
 const fFile = document.getElementById('f-file');
 const previewEl = document.getElementById('preview');
-const catList = document.getElementById('cat-list');
+
+const btnManageCat = document.getElementById('btn-manage-cat');
+const categoryModal = document.getElementById('category-modal');
+const catNewInput = document.getElementById('cat-new-input');
+const catAddBtn = document.getElementById('cat-add-btn');
+const categoryList = document.getElementById('category-list');
+
+const iconPickerModal = document.getElementById('icon-picker-modal');
+const pickerTitle = document.getElementById('picker-title');
+const pickerSearch = document.getElementById('picker-search');
+const pickerGrid = document.getElementById('picker-grid');
+const pickerEmpty = document.getElementById('picker-empty');
+const pickerSelected = document.getElementById('picker-selected');
 
 const viewer = document.getElementById('viewer');
 const viewerBody = document.getElementById('viewer-body');
@@ -72,7 +85,8 @@ const pagination = document.getElementById('pagination');
 const pageSizeSelect = document.getElementById('page-size');
 const pagePrev = document.getElementById('page-prev');
 const pageNext = document.getElementById('page-next');
-const pageInfo = document.getElementById('page-info');
+const pageNumbers = document.getElementById('page-numbers');
+const pageTotal = document.getElementById('page-total');
 
 const viewGrid = document.getElementById('view-grid');
 const viewList = document.getElementById('view-list');
@@ -81,6 +95,11 @@ let debounceTimer = null;
 let currentFolderId = null;        // null = 全部图标
 let folderModalCallback = null;    // resolve({ name }) 或 null
 let allFolders = [];               // 最近一次从 API 获取的文件夹列表
+let allCategories = [];            // 最近一次从 API 获取的分类字典 [{id,name,icon_count}]
+let pickerCategoryName = '';       // 图标选择器当前所属分类名
+let pickerAllIcons = [];           // 选择器中的全部图标
+let pickerInitialIds = new Set();  // 打开选择器时已属于该分类的图标 id（用于 diff）
+let pickerCheckedIds = new Set();  // 选择器中当前勾选的图标 id
 let collapsedFolders = new Set();  // 已折叠的文件夹 id，重渲染时保持折叠状态
 let dragCounter = 0;               // 拖拽进入计数，防止子元素触发闪烁
 let selectedIconIds = new Set();    // 当前列表中已勾选的图标 id
@@ -194,7 +213,7 @@ function populateBatchFolderSelect() {
 }
 
 function typeLabel(type) {
-  return type === 'symbol' ? 'SVG 符号' : '应用图标';
+  return type === 'symbol' ? 'SVG' : '图片';
 }
 
 function thumbHtml(icon) {
@@ -241,6 +260,22 @@ function renderFolderTree() {
   renderTreeNodes(folderTree, null, allFolders, 0);
 }
 
+// 收集某文件夹及其所有后代的 id（含自身）
+function collectFolderIds(folderId, folders) {
+  const result = [folderId];
+  folders.filter((f) => f.parent_id === folderId).forEach((c) => {
+    result.push(...collectFolderIds(c.id, folders));
+  });
+  return result;
+}
+
+// 递归累加某文件夹及其所有后代的图标总数
+function totalIconCount(folderId, folders) {
+  const children = folders.filter((f) => f.parent_id === folderId);
+  return folders.find((f) => f.id === folderId)?.icon_count || 0
+    + children.reduce((sum, c) => sum + totalIconCount(c.id, folders), 0);
+}
+
 function renderTreeNodes(parentEl, parentId, folders, depth) {
   const children = folders.filter(
     (f) => (f.parent_id === parentId) || (parentId === null && !f.parent_id)
@@ -264,7 +299,7 @@ function renderTreeNodes(parentEl, parentId, folders, depth) {
       <span class="folder-toggle">${hasChildren ? ICONS.chevronRight : ''}</span>
       <span class="folder-icon">${ICONS.folder}</span>
       <span class="folder-name">${esc(folder.name)}</span>
-      <span class="folder-count">${folder.icon_count || 0}</span>
+      <span class="folder-count">${totalIconCount(folder.id, folders)}</span>
       <span class="folder-actions">
         <button class="folder-action-btn" data-action="rename" title="重命名">${ICONS.pencil}</button>
         <button class="folder-action-btn" data-action="add-sub" title="新建子文件夹">${ICONS.plus}</button>
@@ -449,7 +484,9 @@ async function loadIcons() {
     pageSize,
   });
   if (currentFolderId !== null) {
-    params.set('folder_id', currentFolderId);
+    // 收集当前文件夹及其所有后代 id，一并查询以展示子级图标
+    const ids = collectFolderIds(currentFolderId, allFolders);
+    params.set('folder_ids', ids.join(','));
   }
   let data;
   try {
@@ -475,11 +512,15 @@ async function loadIcons() {
       <label class="card-select" title="选择图标">
         <input type="checkbox" data-id="${icon.id}" ${selectedIconIds.has(String(icon.id)) ? 'checked' : ''} />
       </label>
-      <div class="card-thumb" data-id="${icon.id}">${thumbHtml(icon)}</div>
+      <div class="card-thumb" data-id="${icon.id}">
+        ${thumbHtml(icon)}
+        <span class="type-badge type-badge-${icon.type === 'symbol' ? 'symbol' : 'app'}" title="${esc(typeLabel(icon.type))}">${icon.type === 'symbol' ? 'SVG' : '图片'}</span>
+      </div>
       <div class="card-name" title="${esc(icon.name)}">${esc(icon.name)}</div>
       <div class="card-meta">
-        <span class="tag type-${icon.type === 'symbol' ? 'symbol' : 'app'}">${typeLabel(icon.type)}</span>
-        ${icon.category ? `<span class="tag">${esc(icon.category)}</span>` : ''}
+        ${icon.category
+          ? `<span class="tag">${esc(icon.category)}</span>`
+          : '<span class="tag tag-muted">未分类</span>'}
       </div>
       <div class="card-actions">
         <button class="edit" data-id="${icon.id}" title="编辑" aria-label="编辑">${ICONS.pencil}</button>
@@ -508,9 +549,29 @@ async function loadIcons() {
 function renderPagination() {
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   pagination.hidden = totalCount === 0;
-  pageInfo.textContent = `第 ${currentPage} / ${totalPages} 页`;
+  pageTotal.textContent = totalCount;
   pagePrev.disabled = currentPage <= 1;
   pageNext.disabled = currentPage >= totalPages;
+  pageNumbers.innerHTML = buildPageItems(currentPage, totalPages)
+    .map((item) => item === '...'
+      ? '<span class="pg-dots">…</span>'
+      : `<button type="button" class="pg-num${item === currentPage ? ' cur' : ''}" data-page="${item}">${item}</button>`)
+    .join('');
+}
+
+// 生成页码序列：总页数≤7 全展开；否则保留首页、末页、当前页±1，其余折叠为省略号
+function buildPageItems(cur, total) {
+  if (total <= 7) {
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }
+  const items = [1];
+  const left = Math.max(2, cur - 1);
+  const right = Math.min(total - 1, cur + 1);
+  if (left > 2) items.push('...');
+  for (let p = left; p <= right; p++) items.push(p);
+  if (right < total - 1) items.push('...');
+  items.push(total);
+  return items;
 }
 
 function goToPage(page) {
@@ -536,20 +597,210 @@ function findIcon(list, id) {
 
 async function loadCategories() {
   const res = await fetch('/api/categories');
-  const cats = await res.json();
-  const current = filterCategory.value;
+  allCategories = await res.json();
+
+  // 顶部筛选下拉：保留当前选中
+  const currentFilter = filterCategory.value;
   filterCategory.innerHTML = '<option value="">全部分类</option>';
-  catList.innerHTML = '';
-  for (const c of cats) {
+  // 表单分类下拉：首项「无分类」，保留当前选中
+  const currentForm = fCategory.value;
+  fCategory.innerHTML = '<option value="">无分类</option>';
+
+  for (const c of allCategories) {
     const opt = document.createElement('option');
-    opt.value = c;
-    opt.textContent = c;
+    opt.value = c.name;
+    opt.textContent = c.name;
     filterCategory.appendChild(opt);
+
     const opt2 = document.createElement('option');
-    opt2.value = c;
-    catList.appendChild(opt2);
+    opt2.value = c.name;
+    opt2.textContent = c.name;
+    fCategory.appendChild(opt2);
   }
-  filterCategory.value = current;
+  filterCategory.value = currentFilter;
+  fCategory.value = currentForm;
+}
+
+// ─── 分类字典管理 ──────────────────────────────────────────
+
+function openCategoryModal() {
+  catNewInput.value = '';
+  renderCategoryList();
+  categoryModal.hidden = false;
+  catNewInput.focus();
+}
+
+function renderCategoryList() {
+  categoryList.innerHTML = '';
+  if (!allCategories.length) {
+    const empty = document.createElement('li');
+    empty.className = 'category-empty';
+    empty.textContent = '暂无分类，请在上方新增';
+    categoryList.appendChild(empty);
+    return;
+  }
+  for (const c of allCategories) {
+    const li = document.createElement('li');
+    li.className = 'category-item';
+    li.innerHTML = `
+      <span class="category-dot"></span>
+      <span class="category-name" title="${esc(c.name)}">${esc(c.name)}</span>
+      <span class="category-count" title="${c.icon_count} 个图标">${c.icon_count}</span>
+      <span class="category-actions">
+        <button class="btn btn-ghost btn-sm" data-action="manage">管理图标</button>
+        <button class="folder-action-btn" data-action="rename" title="重命名">${ICONS.pencil}</button>
+        <button class="folder-action-btn" data-action="delete" title="删除">${ICONS.trash}</button>
+      </span>
+    `;
+    li.querySelector('[data-action="manage"]').addEventListener('click', () => openIconPicker(c));
+    li.querySelector('[data-action="rename"]').addEventListener('click', () => {
+      promptFolderModal('重命名分类', c.name).then((name) => {
+        if (name && name !== c.name) renameCategory(c.id, name);
+      });
+    });
+    li.querySelector('[data-action="delete"]').addEventListener('click', () => deleteCategory(c));
+    categoryList.appendChild(li);
+  }
+}
+
+async function createCategory(name) {
+  try {
+    await apiFetch('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    toast(`已新增分类「${name}」`);
+    catNewInput.value = '';
+    await loadCategories();
+    renderCategoryList();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function renameCategory(id, name) {
+  try {
+    await apiFetch(`/api/categories/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    toast('已重命名分类');
+    await loadCategories();
+    renderCategoryList();
+    await loadIcons(); // 级联后图标卡片分类标签需刷新
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function deleteCategory(cat) {
+  if (!confirm(`确定删除分类「${cat.name}」吗？`)) return;
+  try {
+    await apiFetch(`/api/categories/${cat.id}`, { method: 'DELETE' });
+    toast('已删除分类');
+    await loadCategories();
+    renderCategoryList();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// ─── 图标选择器：为某分类批量归类图标 ──────────────────────
+
+async function openIconPicker(cat) {
+  pickerCategoryName = cat.name;
+  pickerTitle.textContent = `管理「${cat.name}」的图标`;
+  pickerSearch.value = '';
+  iconPickerModal.hidden = false;
+  pickerGrid.innerHTML = '<div class="picker-loading">加载中…</div>';
+  pickerEmpty.hidden = true;
+
+  try {
+    // 不带 page 参数 → 接口返回全部图标数组
+    pickerAllIcons = await apiFetch(API);
+  } catch (err) {
+    toast(err.message, true);
+    pickerAllIcons = [];
+  }
+  // 初始勾选 = 当前已属于该分类的图标
+  pickerInitialIds = new Set(
+    pickerAllIcons.filter((i) => i.category === pickerCategoryName).map((i) => String(i.id))
+  );
+  pickerCheckedIds = new Set(pickerInitialIds);
+  renderPickerGrid();
+}
+
+function renderPickerGrid() {
+  const kw = pickerSearch.value.trim().toLowerCase();
+  const list = kw
+    ? pickerAllIcons.filter((i) => String(i.name).toLowerCase().includes(kw))
+    : pickerAllIcons;
+
+  pickerGrid.innerHTML = '';
+  pickerEmpty.hidden = list.length > 0;
+
+  for (const icon of list) {
+    const id = String(icon.id);
+    const checked = pickerCheckedIds.has(id);
+    const cell = document.createElement('label');
+    cell.className = 'picker-cell' + (checked ? ' checked' : '');
+    cell.innerHTML = `
+      <input type="checkbox" data-id="${id}" ${checked ? 'checked' : ''} />
+      <span class="picker-check">${ICONS.check}</span>
+      <div class="picker-thumb">${thumbHtml(icon)}</div>
+      <div class="picker-name" title="${esc(icon.name)}">${esc(icon.name)}</div>
+    `;
+    const input = cell.querySelector('input');
+    input.addEventListener('change', () => {
+      if (input.checked) pickerCheckedIds.add(id);
+      else pickerCheckedIds.delete(id);
+      cell.classList.toggle('checked', input.checked);
+      updatePickerSelected();
+    });
+    pickerGrid.appendChild(cell);
+  }
+  updatePickerSelected();
+}
+
+function updatePickerSelected() {
+  pickerSelected.textContent = `已选 ${pickerCheckedIds.size} 个`;
+}
+
+async function savePicker() {
+  // 与初始状态对比：新增勾选 → 加入该分类；取消勾选 → 移出（置空）
+  const toAdd = [...pickerCheckedIds].filter((id) => !pickerInitialIds.has(id)).map(Number);
+  const toRemove = [...pickerInitialIds].filter((id) => !pickerCheckedIds.has(id)).map(Number);
+
+  if (!toAdd.length && !toRemove.length) {
+    iconPickerModal.hidden = true;
+    return;
+  }
+
+  try {
+    if (toAdd.length) {
+      await apiFetch('/api/icons/batch/category', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: toAdd, category: pickerCategoryName }),
+      });
+    }
+    if (toRemove.length) {
+      await apiFetch('/api/icons/batch/category', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: toRemove, category: '' }),
+      });
+    }
+    iconPickerModal.hidden = true;
+    toast(`已更新：加入 ${toAdd.length} 个，移出 ${toRemove.length} 个`);
+    await loadCategories();
+    renderCategoryList();
+    await loadIcons();
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 async function moveSelectedIcons() {
@@ -952,6 +1203,10 @@ pageSizeSelect.addEventListener('change', () => {
 });
 pagePrev.addEventListener('click', () => goToPage(currentPage - 1));
 pageNext.addEventListener('click', () => goToPage(currentPage + 1));
+pageNumbers.addEventListener('click', (e) => {
+  const btn = e.target.closest('.pg-num');
+  if (btn) goToPage(Number(btn.dataset.page));
+});
 
 viewGrid.addEventListener('click', () => setViewMode('grid'));
 viewList.addEventListener('click', () => setViewMode('list'));
@@ -985,6 +1240,34 @@ filterCategory.addEventListener('change', () => {
   clearSelection();
   loadIcons();
 });
+
+// ─── 分类管理弹窗事件 ──────────────────────────────────────
+btnManageCat.addEventListener('click', openCategoryModal);
+document.getElementById('category-modal-close').addEventListener('click', () => {
+  categoryModal.hidden = true;
+});
+categoryModal.addEventListener('click', (e) => {
+  if (e.target === categoryModal) categoryModal.hidden = true;
+});
+catAddBtn.addEventListener('click', () => {
+  const name = catNewInput.value.trim();
+  if (name) createCategory(name);
+});
+catNewInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const name = catNewInput.value.trim();
+    if (name) createCategory(name);
+  }
+});
+
+// ─── 图标选择器事件 ────────────────────────────────────────
+document.getElementById('picker-close').addEventListener('click', () => { iconPickerModal.hidden = true; });
+document.getElementById('picker-cancel').addEventListener('click', () => { iconPickerModal.hidden = true; });
+document.getElementById('picker-save').addEventListener('click', savePicker);
+iconPickerModal.addEventListener('click', (e) => {
+  if (e.target === iconPickerModal) iconPickerModal.hidden = true;
+});
+pickerSearch.addEventListener('input', renderPickerGrid);
 
 // ─── 初始化 ────────────────────────────────────────────────
 

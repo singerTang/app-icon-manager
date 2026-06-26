@@ -296,7 +296,7 @@ app.post('/api/icons/batch-zip', uploadZip.single('zipfile'), (req, res) => {
 
 // 列表查询，支持 search / type / category / folder_id 筛选
 app.get('/api/icons', (req, res) => {
-  const { search = '', type = '', category = '', folder_id = '' } = req.query;
+  const { search = '', type = '', category = '', folder_id = '', folder_ids = '' } = req.query;
   const conditions = [];
   const params = [];
 
@@ -313,7 +313,17 @@ app.get('/api/icons', (req, res) => {
     conditions.push('category = ?');
     params.push(category);
   }
-  if (folder_id !== '') {
+  if (folder_ids !== '') {
+    // 多 id 查询（点击父文件夹时含所有后代）
+    const ids = folder_ids.split(',').map(Number).filter((n) => !isNaN(n));
+    if (ids.length === 1) {
+      conditions.push('folder_id = ?');
+      params.push(ids[0]);
+    } else if (ids.length > 1) {
+      conditions.push(`folder_id IN (${ids.map(() => '?').join(',')})`);
+      params.push(...ids);
+    }
+  } else if (folder_id !== '') {
     conditions.push('folder_id IS ?');
     params.push(folder_id === 'null' ? null : Number(folder_id));
   }
@@ -447,6 +457,29 @@ app.patch('/api/icons/batch/folder', (req, res) => {
   res.json({ success: true, updated: info.changes });
 });
 
+// 批量设置图标分类（category 为空字符串表示清除分类；非空时必须是字典中已存在的分类）
+app.patch('/api/icons/batch/category', (req, res) => {
+  const ids = normalizeIds(req.body.ids);
+  if (!ids.length) {
+    return res.status(400).json({ error: '请选择要设置的图标' });
+  }
+
+  const category = String(req.body.category || '').trim();
+  if (category !== '') {
+    const exists = db.prepare('SELECT 1 FROM categories WHERE name = ?').get(category);
+    if (!exists) {
+      return res.status(400).json({ error: '分类不存在' });
+    }
+  }
+
+  const placeholders = ids.map(() => '?').join(',');
+  const info = db
+    .prepare(`UPDATE icons SET category = ?, updated_at = ? WHERE id IN (${placeholders})`)
+    .run(category, now(), ...ids);
+
+  res.json({ success: true, updated: info.changes });
+});
+
 // 批量下载：将选中图标打包为单个 ZIP 返回（文件名用图标名，重名追加序号）
 app.post('/api/icons/batch/download', (req, res) => {
   const ids = normalizeIds(req.body.ids);
@@ -536,12 +569,80 @@ app.delete('/api/icons/:id', (req, res) => {
   res.json({ success: true });
 });
 
-// 已有分类去重列表
+// ─── 分类字典 API ────────────────────────────────────────────
+
+// 分类字典列表，每项附带使用该分类的图标数量 icon_count
 app.get('/api/categories', (req, res) => {
   const rows = db
-    .prepare("SELECT DISTINCT category FROM icons WHERE category != '' ORDER BY category")
+    .prepare(
+      `SELECT c.id, c.name, COUNT(i.id) AS icon_count
+         FROM categories c
+         LEFT JOIN icons i ON i.category = c.name
+        GROUP BY c.id
+        ORDER BY c.name`
+    )
     .all();
-  res.json(rows.map((r) => r.category));
+  res.json(rows);
+});
+
+// 新建分类
+app.post('/api/categories', (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) {
+    return res.status(400).json({ error: '分类名称不能为空' });
+  }
+  try {
+    const info = db
+      .prepare('INSERT INTO categories (name, created_at) VALUES (?, ?)')
+      .run(name, now());
+    res.status(201).json(db.prepare('SELECT * FROM categories WHERE id = ?').get(info.lastInsertRowid));
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({ error: '该分类已存在' });
+    }
+    throw err;
+  }
+});
+
+// 重命名分类：事务内级联更新图标的 category，保持字典与图标一致
+app.put('/api/categories/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const name = String(req.body.name || '').trim();
+  if (!name) {
+    return res.status(400).json({ error: '分类名称不能为空' });
+  }
+  const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: '分类不存在' });
+  if (existing.name === name) return res.json(existing);
+
+  try {
+    db.transaction(() => {
+      db.prepare('UPDATE categories SET name = ? WHERE id = ?').run(name, id);
+      db.prepare('UPDATE icons SET category = ?, updated_at = ? WHERE category = ?')
+        .run(name, now(), existing.name);
+    })();
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({ error: '该分类已存在' });
+    }
+    throw err;
+  }
+  res.json(db.prepare('SELECT * FROM categories WHERE id = ?').get(id));
+});
+
+// 删除分类：若有图标正在使用则禁止删除并提示
+app.delete('/api/categories/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  if (!existing) return res.status(404).json({ error: '分类不存在' });
+
+  const inUse = db.prepare('SELECT COUNT(*) AS n FROM icons WHERE category = ?').get(existing.name).n;
+  if (inUse > 0) {
+    return res.status(409).json({ error: `该分类下有 ${inUse} 个图标，无法删除` });
+  }
+
+  db.prepare('DELETE FROM categories WHERE id = ?').run(id);
+  res.json({ success: true });
 });
 
 // 导出全部数据为 JSON

@@ -29,6 +29,10 @@
       </div>
       <!-- 文件夹树由 app.js 的 renderFolderTree() 动态渲染 -->
       <ul id="folder-tree" class="folder-tree"></ul>
+      <button class="sidebar-cat-btn" id="btn-manage-cat" type="button">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M9 5H2v7l6.29 6.29c.94.94 2.48.94 3.42 0l3.58-3.58c.94-.94.94-2.48 0-3.42L9 5Z"/><path d="M6 9.01V9"/><path d="m15 5 6.3 6.3a2.4 2.4 0 0 1 0 3.4L17 19"/></svg>
+        <span>分类管理</span>
+      </button>
       <div class="sidebar-foot" id="sidebar-foot">
         <span class="sidebar-foot-icon"><svg class="icon" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></span>
         <span class="sidebar-foot-text">共 <b id="sidebar-total">0</b> 个图标</span>
@@ -43,8 +47,8 @@
           <div class="filters">
             <select id="filter-type" class="select">
               <option value="">全部类型</option>
-              <option value="app">应用图标</option>
-              <option value="symbol">SVG 符号</option>
+              <option value="app">图片</option>
+              <option value="symbol">SVG</option>
             </select>
             <select id="filter-category" class="select">
               <option value="">全部分类</option>
@@ -97,13 +101,13 @@
             <option value="50" selected>50</option>
             <option value="100">100</option>
           </select>
-          条
+          条 · 共 <b id="page-total">0</b> 个
         </div>
-        <div class="pagination-nav">
-          <button id="page-prev" class="btn btn-ghost" type="button">上一页</button>
-          <span id="page-info" class="page-info"></span>
-          <button id="page-next" class="btn btn-ghost" type="button">下一页</button>
-        </div>
+        <nav class="pagination-nav" aria-label="分页导航">
+          <button id="page-prev" class="pg-btn" type="button" title="上一页" aria-label="上一页"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+          <div id="page-numbers" class="page-numbers"></div>
+          <button id="page-next" class="pg-btn" type="button" title="下一页" aria-label="下一页"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+        </nav>
       </footer>
     </div>
   </div>
@@ -125,8 +129,8 @@
           <div class="form-row">
             <label>类型</label>
             <select id="f-type">
-              <option value="app">应用图标</option>
-              <option value="symbol">SVG 符号</option>
+              <option value="app">图片</option>
+              <option value="symbol">SVG</option>
             </select>
           </div>
           <div class="form-row">
@@ -143,8 +147,9 @@
           </div>
           <div class="form-row">
             <label>分类</label>
-            <input id="f-category" type="text" list="cat-list" placeholder="例如：社交 / 工具" />
-            <datalist id="cat-list"></datalist>
+            <select id="f-category">
+              <option value="">无分类</option>
+            </select>
           </div>
         </div>
         <div class="form-row">
@@ -196,6 +201,46 @@
         <div class="form-actions" style="margin-top:16px">
           <button type="button" class="btn btn-ghost" id="folder-cancel">取消</button>
           <button type="button" class="btn btn-primary" id="folder-confirm">确认</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分类管理弹窗 -->
+  <div id="category-modal" class="modal" hidden>
+    <div class="modal-card cat-modal-card">
+      <div class="modal-head">
+        <h2>分类管理</h2>
+        <button class="modal-close" id="category-modal-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div class="cat-modal-body">
+        <div class="cat-add-row">
+          <input id="cat-new-input" type="text" placeholder="输入新分类名称，如：极简报销" />
+          <button type="button" class="btn btn-primary" id="cat-add-btn"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新增</button>
+        </div>
+        <ul id="category-list" class="category-list"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- 图标选择器弹窗：为某分类批量归类图标 -->
+  <div id="icon-picker-modal" class="modal" hidden>
+    <div class="modal-card picker-card">
+      <div class="modal-head">
+        <h2 id="picker-title">管理图标</h2>
+        <button class="modal-close" id="picker-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div class="picker-toolbar">
+        <input id="picker-search" type="search" class="search" placeholder="搜索图标名称…" />
+        <span class="picker-hint">勾选 = 加入该分类，取消 = 移出</span>
+      </div>
+      <div id="picker-grid" class="picker-grid"></div>
+      <div id="picker-empty" class="picker-empty" hidden>没有匹配的图标</div>
+      <div class="picker-foot">
+        <span id="picker-selected" class="picker-selected">已选 0 个</span>
+        <div class="picker-foot-actions">
+          <button type="button" class="btn btn-ghost" id="picker-cancel">取消</button>
+          <button type="button" class="btn btn-primary" id="picker-save">保存</button>
         </div>
       </div>
     </div>

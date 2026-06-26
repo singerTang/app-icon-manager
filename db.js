@@ -58,6 +58,22 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 `);
 
+// 建表：categories（分类字典，name 唯一）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS categories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL UNIQUE,
+    created_at TEXT    NOT NULL
+  );
+`);
+
+// 启动时补种字典：将图标在用分类同步进字典（INSERT OR IGNORE 幂等，只增不删）
+// 保证「任何被图标使用中的分类必然存在于字典」这一不变式
+db.prepare(
+  `INSERT OR IGNORE INTO categories (name, created_at)
+   SELECT DISTINCT category, ? FROM icons WHERE category != ''`
+).run(new Date().toISOString());
+
 // 兼容旧库：为 icons 表追加 folder_id 列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）
 // 用 PRAGMA 显式检查列是否存在，避免用 try/catch 吞掉真实的数据库错误
 const hasFolderCol = db

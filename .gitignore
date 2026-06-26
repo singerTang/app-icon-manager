@@ -8,3 +8,7 @@ uploads/
 test-results/
 test/e2e/report/
 playwright-report/
+
+# 构建打包产物与设计稿（不纳入仓库）
+dist/
+分页方案预览.html
