@@ -55,19 +55,20 @@ test.describe('新增图标', () => {
   });
 
   test('表单提交新增应用图标，列表出现新卡片', async ({ page, request }) => {
+    await request.post(`${BASE_API}/categories`, { data: { name: 'E2E测试' } });
     await page.goto('/');
 
     await page.click('#btn-add');
     await page.fill('#f-name', 'E2E-应用图标');
     await page.selectOption('#f-type', 'app');
-    await page.fill('#f-category', 'E2E测试');
+    await page.selectOption('#f-category', { label: 'E2E测试' });
     await page.fill('#f-tags', 'e2e,playwright');
     await page.fill('#f-version', '3.0.0');
     await page.click('#form-submit');
 
     await expect(page.locator('#modal')).toBeHidden();
-    await expect(page.locator('.card-name')).toContainText('E2E-应用图标');
-    await expect(page.locator('.tag.type-app')).toBeVisible();
+    await expect(page.locator('.card-name', { hasText: 'E2E-应用图标' })).toBeVisible();
+    await expect(page.locator('.card-name', { hasText: 'E2E-应用图标' }).locator('..').locator('.tag.type-app')).toBeVisible();
 
     // Toast 提示出现
     await expect(page.locator('#toast')).toContainText('已新增');
@@ -86,7 +87,7 @@ test.describe('新增图标', () => {
     await page.click('#form-submit');
 
     await expect(page.locator('#modal')).toBeHidden();
-    await expect(page.locator('.tag.type-symbol')).toBeVisible();
+    await expect(page.locator('.card-name', { hasText: 'E2E-SVG符号' }).locator('..').locator('.tag.type-symbol')).toBeVisible();
 
     const icon = await (await fetch(`${BASE_API}/icons?search=E2E-SVG符号`)).json();
     if (icon[0]) await deleteIcon(request, icon[0].id);
@@ -208,7 +209,7 @@ test.describe('编辑图标', () => {
     await page.click('#form-submit');
 
     await expect(page.locator('#modal')).toBeHidden();
-    await expect(page.locator('.card-name').first()).toContainText('E2E-已编辑');
+    await expect(page.locator('.card-name', { hasText: 'E2E-已编辑' })).toBeVisible();
     await expect(page.locator('#toast')).toContainText('已更新');
   });
 });

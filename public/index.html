@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <title>应用 icon 管理端</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -43,7 +44,10 @@
     <div class="content">
       <section class="toolbar">
         <div class="toolbar-row toolbar-row-main">
-          <input id="search" type="search" class="search" placeholder="搜索名称、标签、描述…" />
+          <div class="search-box">
+            <svg class="search-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input id="search" type="search" class="search" placeholder="搜索名称、标签、描述…" />
+          </div>
           <div class="filters">
             <select id="filter-type" class="select">
               <option value="">全部类型</option>
@@ -57,10 +61,6 @@
           <div class="toolbar-btns">
             <button id="btn-batch" class="btn btn-ghost"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>批量上传</button>
             <button id="btn-zip" class="btn btn-ghost"><svg class="icon" viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>导入 ZIP</button>
-          </div>
-          <div class="view-toggle" role="group" aria-label="展示方式">
-            <button id="view-grid" class="view-btn active" type="button" title="网格视图"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
-            <button id="view-list" class="view-btn" type="button" title="列表视图"><svg class="icon" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
           </div>
           <button id="btn-add" class="btn btn-primary" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新增图标</button>
         </div>
@@ -94,14 +94,20 @@
 
       <!-- 分页栏 -->
       <footer id="pagination" class="pagination" hidden>
-        <div class="pagination-size">
-          每页
-          <select id="page-size" class="select">
-            <option value="30">30</option>
-            <option value="50" selected>50</option>
-            <option value="100">100</option>
-          </select>
-          条 · 共 <b id="page-total">0</b> 个
+        <div class="pagination-left">
+          <div class="view-toggle" role="group" aria-label="展示方式">
+            <button id="view-grid" class="view-btn active" type="button" title="网格视图"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
+            <button id="view-list" class="view-btn" type="button" title="列表视图"><svg class="icon" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+          </div>
+          <div class="pagination-size">
+            每页
+            <select id="page-size" class="select">
+              <option value="30">30</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+            条 · 共 <b id="page-total">0</b> 个
+          </div>
         </div>
         <nav class="pagination-nav" aria-label="分页导航">
           <button id="page-prev" class="pg-btn" type="button" title="上一页" aria-label="上一页"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
@@ -231,8 +237,11 @@
         <button class="modal-close" id="picker-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
       </div>
       <div class="picker-toolbar">
-        <input id="picker-search" type="search" class="search" placeholder="搜索图标名称…" />
-        <span class="picker-hint">勾选 = 加入该分类，取消 = 移出</span>
+        <div class="search-box">
+          <svg class="search-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input id="picker-search" type="search" class="search" placeholder="搜索图标名称…" />
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" id="picker-select-all">全选当前</button>
       </div>
       <div id="picker-grid" class="picker-grid"></div>
       <div id="picker-empty" class="picker-empty" hidden>没有匹配的图标</div>
@@ -264,8 +273,36 @@
   <input id="batch-file" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.ico" multiple hidden />
   <input id="zip-file" type="file" accept=".zip" hidden />
 
+  <!-- AI 在线生成弹窗 -->
+  <div id="ai-generate-modal" class="modal" hidden>
+    <div class="modal-card ai-card">
+      <div class="modal-head">
+        <h2>AI 生成图标</h2>
+        <button class="modal-close" id="ai-modal-close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div class="ai-toolbar">
+        <input id="ai-name" type="text" class="ai-input" placeholder="输入图标名称，如：报销、总账、预算（三套财务风格各生成 1 张）" />
+        <button type="button" class="btn btn-primary" id="ai-generate-btn">生成</button>
+      </div>
+      <div id="ai-grid" class="ai-grid"></div>
+      <div id="ai-empty" class="ai-empty">输入图标名称后点击「生成」，三套财务风格结果将出现在这里。</div>
+      <div class="ai-foot">
+        <div class="ai-foot-config">
+          <select id="ai-folder" class="select"></select>
+          <select id="ai-category" class="select"></select>
+        </div>
+        <div class="ai-foot-actions">
+          <span id="ai-selected-count" class="ai-selected-count">已选 0 个</span>
+          <button type="button" class="btn btn-ghost" id="ai-cancel">取消</button>
+          <button type="button" class="btn btn-primary" id="ai-save" disabled>入库所选</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
 
   <script src="app.js"></script>
 </body>
 </html>
+

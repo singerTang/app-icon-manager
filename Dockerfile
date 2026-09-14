@@ -21,6 +21,7 @@ WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
 COPY package.json ./
 COPY server.js db.js ./
+COPY lib ./lib
 COPY public ./public
 # 数据库与上传目录，运行时通过 volume 挂载实现持久化
 RUN mkdir -p data uploads

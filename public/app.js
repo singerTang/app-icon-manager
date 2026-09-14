@@ -48,6 +48,7 @@ const pickerSearch = document.getElementById('picker-search');
 const pickerGrid = document.getElementById('picker-grid');
 const pickerEmpty = document.getElementById('picker-empty');
 const pickerSelected = document.getElementById('picker-selected');
+const pickerSelectAll = document.getElementById('picker-select-all');
 
 const viewer = document.getElementById('viewer');
 const viewerBody = document.getElementById('viewer-body');
@@ -90,6 +91,7 @@ const pageTotal = document.getElementById('page-total');
 
 const viewGrid = document.getElementById('view-grid');
 const viewList = document.getElementById('view-list');
+
 
 let debounceTimer = null;
 let currentFolderId = null;        // null = 全部图标
@@ -272,7 +274,7 @@ function collectFolderIds(folderId, folders) {
 // 递归累加某文件夹及其所有后代的图标总数
 function totalIconCount(folderId, folders) {
   const children = folders.filter((f) => f.parent_id === folderId);
-  return folders.find((f) => f.id === folderId)?.icon_count || 0
+  return (folders.find((f) => f.id === folderId)?.icon_count || 0)
     + children.reduce((sum, c) => sum + totalIconCount(c.id, folders), 0);
 }
 
@@ -518,6 +520,7 @@ async function loadIcons() {
       </div>
       <div class="card-name" title="${esc(icon.name)}">${esc(icon.name)}</div>
       <div class="card-meta">
+        <span class="tag tag-type type-${icon.type === 'symbol' ? 'symbol' : 'app'}">${icon.type === 'symbol' ? 'SVG' : '图片'}</span>
         ${icon.category
           ? `<span class="tag">${esc(icon.category)}</span>`
           : '<span class="tag tag-muted">未分类</span>'}
@@ -732,11 +735,20 @@ async function openIconPicker(cat) {
   renderPickerGrid();
 }
 
-function renderPickerGrid() {
+// 当前搜索过滤后的可见图标（无关键词时即全部）
+function getPickerList() {
   const kw = pickerSearch.value.trim().toLowerCase();
-  const list = kw
-    ? pickerAllIcons.filter((i) => String(i.name).toLowerCase().includes(kw))
-    : pickerAllIcons;
+  // 单分类模型：只允许当前分类与未分类图标参与选择，避免静默转移其他分类。
+  const available = pickerAllIcons.filter(
+    (i) => !i.category || i.category === pickerCategoryName
+  );
+  return kw
+    ? available.filter((i) => String(i.name).toLowerCase().includes(kw))
+    : available;
+}
+
+function renderPickerGrid() {
+  const list = getPickerList();
 
   pickerGrid.innerHTML = '';
   pickerEmpty.hidden = list.length > 0;
@@ -766,6 +778,25 @@ function renderPickerGrid() {
 
 function updatePickerSelected() {
   pickerSelected.textContent = `已选 ${pickerCheckedIds.size} 个`;
+  pickerSelected.classList.toggle('is-active', pickerCheckedIds.size > 0);
+  // 当前可见图标是否已全部勾选，决定按钮文案与禁用态
+  const list = getPickerList();
+  const allChecked = list.length > 0 && list.every((i) => pickerCheckedIds.has(String(i.id)));
+  pickerSelectAll.textContent = allChecked ? '取消全选' : '全选当前';
+  pickerSelectAll.disabled = list.length === 0;
+}
+
+// 一键勾选/取消当前可见图标（受搜索过滤影响）
+function togglePickerSelectAll() {
+  const list = getPickerList();
+  if (!list.length) return;
+  const allChecked = list.every((i) => pickerCheckedIds.has(String(i.id)));
+  for (const icon of list) {
+    const id = String(icon.id);
+    if (allChecked) pickerCheckedIds.delete(id);
+    else pickerCheckedIds.add(id);
+  }
+  renderPickerGrid();
 }
 
 async function savePicker() {
@@ -1264,6 +1295,7 @@ catNewInput.addEventListener('keydown', (e) => {
 document.getElementById('picker-close').addEventListener('click', () => { iconPickerModal.hidden = true; });
 document.getElementById('picker-cancel').addEventListener('click', () => { iconPickerModal.hidden = true; });
 document.getElementById('picker-save').addEventListener('click', savePicker);
+pickerSelectAll.addEventListener('click', togglePickerSelectAll);
 iconPickerModal.addEventListener('click', (e) => {
   if (e.target === iconPickerModal) iconPickerModal.hidden = true;
 });

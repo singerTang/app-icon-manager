@@ -316,11 +316,13 @@ describe('DELETE /api/icons/:id', () => {
 // ─── 分类 ───────────────────────────────────────────────────
 describe('GET /api/categories', () => {
   it('返回去重后的分类数组', async () => {
+    await api('POST', '/api/categories', { name: '测试分类' });
     const { status, data } = await api('GET', '/api/categories');
     assert.equal(status, 200);
     assert.ok(Array.isArray(data));
-    assert.ok(data.includes('测试分类'), `未找到"测试分类"，实际：${JSON.stringify(data)}`);
-    assert.equal(new Set(data).size, data.length, '存在重复分类');
+    const names = data.map((item) => item.name);
+    assert.ok(names.includes('测试分类'), `未找到"测试分类"，实际：${JSON.stringify(data)}`);
+    assert.equal(new Set(names).size, names.length, '存在重复分类');
   });
 });
 

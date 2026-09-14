@@ -1,11 +1,19 @@
 // 应用 icon 管理端：Express 服务入口
 // 提供静态页面托管与 icons 的增删改查、分类、导入导出 API
 
+// 读取 .env 配置（AI 服务商与密钥），必须在其他模块加载前执行
+require('dotenv').config();
+
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
+const crypto = require('crypto');
+const { Resvg } = require('@resvg/resvg-js');
+const aiGenerate = require('./lib/ai');
+const { STYLES, buildUserPrompt } = require('./lib/ai/styles');
+const { sanitizeSvg } = require('./lib/ai/sanitize-svg');
 const db = require('./db');
 
 const app = express();
@@ -57,6 +65,23 @@ function parseOptionalFolderId(value) {
   return Number.isInteger(id) && id > 0 ? id : NaN;
 }
 
+function resolveFolderId(value) {
+  const id = parseOptionalFolderId(value);
+  if (Number.isNaN(id)) return { error: '文件夹 ID 无效' };
+  if (id !== null && !db.prepare('SELECT 1 FROM folders WHERE id = ?').get(id)) {
+    return { error: '文件夹不存在' };
+  }
+  return { value: id };
+}
+
+function ensureCategory(name) {
+  const category = String(name || '').trim();
+  if (category) {
+    db.prepare('INSERT OR IGNORE INTO categories (name, created_at) VALUES (?, ?)').run(category, now());
+  }
+  return category;
+}
+
 // multer 存储配置：保留原扩展名，文件名加时间戳避免冲突
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
@@ -66,7 +91,8 @@ const storage = multer.diskStorage({
     const base = path.basename(originalName, ext)
       .replace(/[^\w\u4e00-\u9fa5-]/g, '_')
       .slice(0, 50);
-    cb(null, `${Date.now()}_${base}${ext}`);
+    // 加随机后缀，避免同一毫秒内多个同名文件互相覆盖（批量上传同名文件场景）
+    cb(null, `${Date.now()}_${crypto.randomBytes(3).toString('hex')}_${base}${ext}`);
   },
 });
 
@@ -139,6 +165,29 @@ function removeFileByPath(filePath) {
   }
 }
 
+// 生成上传文件名（与 multer 命名规则一致，供 buffer 写盘复用）
+function genUploadName(ext, label) {
+  const base = String(label || 'icon').replace(/[^\w一-龥-]/g, '_').slice(0, 50) || 'icon';
+  return `${Date.now()}_${crypto.randomBytes(3).toString('hex')}_${base}${ext}`;
+}
+
+// 将 buffer 写入 uploads/，返回 /uploads/<filename> 与绝对路径
+function writeBufferToUploads(buffer, ext, label) {
+  const filename = genUploadName(ext, label);
+  const abs = path.join(uploadDir, filename);
+  fs.writeFileSync(abs, buffer);
+  return { filename, file_path: `/uploads/${filename}`, abs };
+}
+
+// SVG → PNG 光栅化（@resvg/resvg-js），输出 PNG Buffer；默认 256×256（应用图标规格）
+function renderSvgToPng(svg, size = 256) {
+  const resvg = new Resvg(svg, {
+    fitTo: { mode: 'width', value: size },
+    background: 'rgba(0,0,0,0)',
+  });
+  return resvg.render().asPng();
+}
+
 // ─── 文件夹 API ──────────────────────────────────────────────
 
 // 获取所有文件夹（flat 数组，前端构建树），每项附带直属图标数量 icon_count
@@ -168,9 +217,14 @@ app.post('/api/folders', (req, res) => {
   if (!name || !name.trim()) {
     return res.status(400).json({ error: '文件夹名称不能为空' });
   }
+  const parent = resolveFolderId(parent_id);
+  if (parent.error) return res.status(400).json({ error: parent.error });
+  if (parent.value !== null && parent.value === Number(req.body.id)) {
+    return res.status(400).json({ error: '文件夹不能以自己为父级' });
+  }
   const info = db
     .prepare('INSERT INTO folders (name, parent_id, created_at) VALUES (?, ?, ?)')
-    .run(name.trim(), parent_id || null, now());
+    .run(name.trim(), parent.value, now());
   const row = db.prepare('SELECT * FROM folders WHERE id = ?').get(info.lastInsertRowid);
   res.status(201).json(row);
 });
@@ -215,7 +269,12 @@ app.post('/api/icons/batch', upload.array('files', 50), (req, res) => {
   if (!files.length) {
     return res.status(400).json({ error: '未收到文件' });
   }
-  const folder_id = req.body.folder_id ? Number(req.body.folder_id) : null;
+  const folder = resolveFolderId(req.body.folder_id);
+  if (folder.error) {
+    files.forEach(removeUploadedFile);
+    return res.status(400).json({ error: folder.error });
+  }
+  const folder_id = folder.value;
   const type = ALLOWED_TYPES.includes(req.body.type) ? req.body.type : null;
 
   const insert = db.prepare(
@@ -243,8 +302,14 @@ app.post('/api/icons/batch-zip', uploadZip.single('zipfile'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: '未收到 ZIP 文件' });
   }
-  const folder_id = req.body.folder_id ? Number(req.body.folder_id) : null;
+  const folder = resolveFolderId(req.body.folder_id);
+  if (folder.error) {
+    removeUploadedFile(req.file);
+    return res.status(400).json({ error: folder.error });
+  }
+  const folder_id = folder.value;
   const zipPath = req.file.path;
+  const writtenFiles = [];
 
   let added = 0;
   let skipped = 0;
@@ -252,6 +317,8 @@ app.post('/api/icons/batch-zip', uploadZip.single('zipfile'), (req, res) => {
   try {
     const zip = new AdmZip(zipPath);
     const entries = zip.getEntries();
+    if (entries.length > 500) throw new Error('ZIP 文件条目数量超过 500 个');
+    let totalSize = 0;
 
     const insert = db.prepare(
       `INSERT INTO icons (name, type, category, tags, file_path, file_type, description, version, folder_id, created_at, updated_at)
@@ -265,12 +332,18 @@ app.post('/api/icons/batch-zip', uploadZip.single('zipfile'), (req, res) => {
       const entryName = decodeZipEntryName(entry);
       const ext = path.extname(entryName).toLowerCase();
       if (!ALLOWED_EXT.includes(ext)) { skipped += 1; return; }
+      const entrySize = Number(entry.header && entry.header.size) || 0;
+      totalSize += entrySize;
+      if (entrySize > 5 * 1024 * 1024 || totalSize > 100 * 1024 * 1024) {
+        throw new Error('ZIP 解压后的文件总大小超过 100MB 限制');
+      }
 
       const baseName = path.basename(entryName, ext);
       // 加入循环下标，避免同一毫秒内多文件名碰撞导致互相覆盖
       const filename = `${Date.now()}_${i}_${baseName.replace(/[^\w一-龥-]/g, '_').slice(0, 50)}${ext}`;
       const destPath = path.join(uploadDir, filename);
       fs.writeFileSync(destPath, entry.getData());
+      writtenFiles.push(destPath);
 
       records.push({ baseName, iconType: ext === '.svg' ? 'symbol' : 'app', filename, ext });
     });
@@ -284,12 +357,162 @@ app.post('/api/icons/batch-zip', uploadZip.single('zipfile'), (req, res) => {
       }
     })();
   } catch (err) {
+    for (const file of writtenFiles) {
+      try { fs.unlinkSync(file); } catch {}
+    }
     fs.unlink(zipPath, () => {});
     return res.status(400).json({ error: `ZIP 解析失败：${err.message}` });
   }
 
   fs.unlink(zipPath, () => {});
   res.json({ added, skipped });
+});
+
+// AI generation is intentionally disabled for this deployment.
+app.use(['/api/icons/ai-generate', '/api/icons/ai-save'], (req, res) => {
+  res.status(404).json({ error: 'AI 生成功能当前未启用' });
+});
+
+// ─── AI 在线生成 ─────────────────────────────────────────────
+
+// AI 生成候选（不入库）：输入图标名称 → 固定三套财务风格各产出 1 张 → 光栅化为 PNG dataUrl 供前端预览
+app.post('/api/icons/ai-generate', async (req, res, next) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    if (!name) {
+      return res.status(400).json({ error: '请输入图标名称' });
+    }
+    if (name.length > 60) {
+      return res.status(400).json({ error: '名称过长（上限 60 字）' });
+    }
+
+    // 三套风格并发各生成 1 张；任一风格失败不阻塞其余
+    const results = await Promise.allSettled(
+      STYLES.map((style) =>
+        aiGenerate
+          .generateIcons({
+            name,
+            userPrompt: buildUserPrompt(name),
+            systemPrompt: style.systemPrompt,
+            count: 1,
+          })
+          .then((arr) => (arr[0] ? { style, item: arr[0] } : null))
+      )
+    );
+
+    const items = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === 'fulfilled' && r.value && r.value.item) {
+        const { style, item } = r.value;
+        let pngDataUrl = '';
+        try {
+          pngDataUrl = `data:image/png;base64,${renderSvgToPng(item.svg).toString('base64')}`;
+        } catch (err) {
+          console.warn(`风格「${style.label}」光栅化失败:`, err.message);
+        }
+        items.push({
+          id: `ai_${i}_${crypto.randomBytes(3).toString('hex')}`,
+          styleKey: style.key,
+          styleLabel: style.label,
+          name: item.name,
+          svg: item.svg,
+          pngDataUrl,
+        });
+      } else if (r.status === 'rejected') {
+        console.warn(`风格「${STYLES[i].label}」生成失败:`, r.reason && r.reason.message);
+      }
+    }
+
+    if (!items.length) {
+      // 取首个���败原因：配置类错误返回 400，其余返回 500
+      const firstReason = results.find((x) => x.status === 'rejected');
+      const msg = (firstReason && firstReason.reason && firstReason.reason.message) || '';
+      const isConfig = /未配置|不支持的 AI_PROVIDER/.test(msg);
+      return res.status(isConfig ? 400 : 500).json({
+        error: isConfig ? msg : 'AI 未能生成有效图标，请重试',
+      });
+    }
+
+    res.json({ items });
+  } catch (err) {
+    err.status = /未配置|不支持的 AI_PROVIDER/.test(err.message) ? 400 : 500;
+    next(err);
+  }
+});
+
+// AI 勾选结果入库：按 formats 写 SVG/PNG 文件并 INSERT，事务包裹
+app.post('/api/icons/ai-save', (req, res, next) => {
+  try {
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+    if (!items.length) {
+      return res.status(400).json({ error: '未选择要入库的图标' });
+    }
+
+    const folder = resolveFolderId(req.body.folder_id);
+    if (folder.error) return res.status(400).json({ error: folder.error });
+    const folder_id = folder.value;
+    const category = ensureCategory(req.body.category);
+    const insert = db.prepare(
+      `INSERT INTO icons (name, type, category, tags, file_path, file_type, description, version, folder_id, created_at, updated_at)
+       VALUES (?, ?, '', '', ?, ?, '', '1.0.0', ?, ?, ?)`
+    );
+
+    const ts = now();
+    let added = 0;
+    const writtenFiles = []; // 事务失败时回滚已落盘文件，防磁盘垃圾
+
+    try {
+      db.transaction(() => {
+        for (const item of items) {
+          const name = String(item.name || '').trim();
+          if (!name) continue;
+          const formats = Array.isArray(item.formats)
+            ? [...new Set(item.formats.filter((f) => f === 'svg' || f === 'png'))]
+            : [];
+          if (!formats.length) continue;
+          // 写盘前再次清洗，与 ai-generate 出口对齐，防止前端篡改 svg 注入
+          const svg = sanitizeSvg(String(item.svg || ''));
+          if (!/^<svg[\s\S]*<\/svg>$/i.test(svg)) continue;
+
+          for (const fmt of formats) {
+            if (fmt === 'svg') {
+              const { filename, file_path } = writeBufferToUploads(Buffer.from(svg, 'utf8'), '.svg', name);
+              writtenFiles.push(filename);
+              insert.run(name, 'symbol', file_path, 'svg', folder_id, ts, ts);
+              added += 1;
+            } else {
+              let png;
+              try {
+                png = renderSvgToPng(svg);
+              } catch (err) {
+                console.warn('AI 入库光栅化失败，跳过 PNG:', err.message);
+                continue;
+              }
+              const { filename, file_path } = writeBufferToUploads(png, '.png', name);
+              writtenFiles.push(filename);
+              insert.run(name, 'app', file_path, 'png', folder_id, ts, ts);
+              added += 1;
+            }
+          }
+        }
+      })();
+    } catch (txErr) {
+      // 事务回滚后清理已写入磁盘的文件
+      for (const f of writtenFiles) {
+        const abs = path.join(uploadDir, f);
+        if (fs.existsSync(abs)) fs.unlink(abs, () => {});
+      }
+      throw txErr;
+    }
+
+    if (!added) {
+      return res.status(400).json({ error: '没有可入库的有效图标' });
+    }
+    res.status(201).json({ added });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ─── 图标 API ────────────────────────────────────────────────
@@ -355,7 +578,8 @@ app.get('/api/icons', (req, res) => {
 
 // 新增图标
 app.post('/api/icons', upload.single('file'), (req, res) => {
-  const { name, type = 'app', category = '', tags = '', description = '', version = '1.0.0' } = req.body;
+  const { name, type = 'app', tags = '', description = '', version = '1.0.0' } = req.body;
+  const category = ensureCategory(req.body.category);
   if (!name || !name.trim()) {
     removeUploadedFile(req.file);
     return res.status(400).json({ error: '名称不能为空' });
@@ -372,9 +596,12 @@ app.post('/api/icons', upload.single('file'), (req, res) => {
     fileType = path.extname(req.file.filename).slice(1).toLowerCase();
   }
 
-  const folder_id = req.body.folder_id !== undefined
-    ? (req.body.folder_id === '' || req.body.folder_id === 'null' ? null : Number(req.body.folder_id))
-    : null;
+  const folder = resolveFolderId(req.body.folder_id);
+  if (folder.error) {
+    removeUploadedFile(req.file);
+    return res.status(400).json({ error: folder.error });
+  }
+  const folder_id = folder.value;
 
   const ts = now();
   const info = db
@@ -424,14 +651,20 @@ app.put('/api/icons/:id', upload.single('file'), (req, res) => {
     fileType = path.extname(req.file.filename).slice(1).toLowerCase();
   }
 
-  const folder_id = req.body.folder_id !== undefined
-    ? (req.body.folder_id === '' || req.body.folder_id === 'null' ? null : Number(req.body.folder_id))
-    : existing.folder_id;
+  const folder = req.body.folder_id !== undefined
+    ? resolveFolderId(req.body.folder_id)
+    : { value: existing.folder_id };
+  if (folder.error) {
+    removeUploadedFile(req.file);
+    return res.status(400).json({ error: folder.error });
+  }
+  const folder_id = folder.value;
+  const normalizedCategory = ensureCategory(category);
 
   db.prepare(
     `UPDATE icons SET name = ?, type = ?, category = ?, tags = ?, file_path = ?, file_type = ?, description = ?, version = ?, folder_id = ?, updated_at = ?
      WHERE id = ?`
-  ).run(name.trim(), type, category, tags, filePath, fileType, description, version, folder_id, now(), id);
+  ).run(name.trim(), type, normalizedCategory, tags, filePath, fileType, description, version, folder_id, now(), id);
 
   const row = db.prepare('SELECT * FROM icons WHERE id = ?').get(id);
   res.json(row);
@@ -447,6 +680,9 @@ app.patch('/api/icons/batch/folder', (req, res) => {
   const folderId = parseOptionalFolderId(req.body.folder_id);
   if (Number.isNaN(folderId)) {
     return res.status(400).json({ error: '文件夹 id 不合法' });
+  }
+  if (folderId !== null && !db.prepare('SELECT 1 FROM folders WHERE id = ?').get(folderId)) {
+    return res.status(400).json({ error: '文件夹不存在' });
   }
 
   const placeholders = ids.map(() => '?').join(',');
@@ -652,6 +888,8 @@ app.get('/api/export', (req, res) => {
     exported_at: now(),
     count: rows.length,
     icons: rows,
+    folders: db.prepare('SELECT * FROM folders ORDER BY id').all(),
+    categories: db.prepare('SELECT * FROM categories ORDER BY id').all(),
   };
   res.setHeader('Content-Disposition', 'attachment; filename="icons-export.json"');
   res.setHeader('Content-Type', 'application/json');
@@ -666,38 +904,62 @@ app.post('/api/import', (req, res) => {
     return res.status(400).json({ error: '导入格式错误，需包含 icons 数组' });
   }
 
-  const insert = db.prepare(
-    `INSERT INTO icons (name, type, category, tags, file_path, file_type, description, version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-
   const importMany = db.transaction((list) => {
+    const folderMap = new Map();
+    const folders = Array.isArray(body.folders) ? body.folders : [];
+    const createFolder = db.prepare('INSERT INTO folders (name, parent_id, created_at) VALUES (?, ?, ?)');
+    const findFolder = db.prepare('SELECT id FROM folders WHERE name = ? AND parent_id IS ?');
+    for (const folder of folders.filter((f) => f && f.id)) {
+      const parentId = folder.parent_id == null ? null : folderMap.get(folder.parent_id) || null;
+      const name = String(folder.name || '未命名文件夹').trim();
+      const existing = findFolder.get(name, parentId);
+      const folderId = existing ? existing.id : Number(createFolder.run(name, parentId, now()).lastInsertRowid);
+      folderMap.set(folder.id, folderId);
+    }
+    const categories = Array.isArray(body.categories) ? body.categories : [];
+    const createCategory = db.prepare('INSERT OR IGNORE INTO categories (name, created_at) VALUES (?, ?)');
+    for (const category of categories) {
+      const name = String(category && category.name || '').trim();
+      if (name) createCategory.run(name, now());
+    }
+    const insert = db.prepare(
+      `INSERT INTO icons (name, type, category, tags, file_path, file_type, description, version, folder_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
     let added = 0;
+    let skipped = 0;
+    const findIcon = db.prepare('SELECT 1 FROM icons WHERE name = ? AND type = ? AND file_path = ?');
     for (const item of list) {
       if (!item) continue;
       const name = String(item.name || '').trim();
       if (!name) continue;
       const safeType = ALLOWED_TYPES.includes(item.type) ? item.type : 'app';
+      const filePath = item.file_path || '';
+      if (findIcon.get(name, safeType, filePath)) {
+        skipped += 1;
+        continue;
+      }
       const ts = now();
       insert.run(
         name,
         safeType,
         item.category || '',
         item.tags || '',
-        item.file_path || '',
+        filePath,
         item.file_type || '',
         item.description || '',
         item.version || '1.0.0',
+        item.folder_id == null ? null : folderMap.get(item.folder_id) || null,
         item.created_at || ts,
         ts
       );
       added += 1;
     }
-    return added;
+    return { added, skipped };
   });
 
-  const added = importMany(icons);
-  res.json({ success: true, added });
+  const result = importMany(icons);
+  res.json({ success: true, ...result });
 });
 
 // 统一错误处理：区分客户端错误（400）与服务端错误（500）
