@@ -2,6 +2,66 @@
 
 const API = '/api/icons';
 
+// 统一操作确认，使用原生 dialog 的焦点约束，文案通过 textContent 写入。
+function confirmAction({ title, description, detail, confirmText, danger = false, delaySeconds = 0 }) {
+  const dialog = document.getElementById('action-dialog');
+  if (dialog.open) return Promise.resolve(false);
+  const submit = document.getElementById('action-submit');
+  document.getElementById('action-title').textContent = title;
+  document.getElementById('action-description').textContent = description;
+  document.getElementById('action-detail').textContent = detail;
+  dialog.dataset.danger = String(danger);
+  submit.textContent = delaySeconds ? `${confirmText}（${delaySeconds} 秒）` : confirmText;
+  submit.disabled = delaySeconds > 0;
+  return new Promise((resolve) => {
+    let finished = false;
+    let countdownTimer;
+    const deadline = performance.now() + delaySeconds * 1000;
+    function finish(accepted) {
+      if (finished) return;
+      finished = true;
+      clearInterval(countdownTimer);
+      if (dialog.open) dialog.close();
+      resolve(accepted);
+    }
+    document.getElementById('action-form').onsubmit = (event) => {
+      event.preventDefault();
+      if (!submit.disabled && performance.now() >= deadline) finish(true);
+    };
+    document.getElementById('action-cancel').onclick = () => finish(false);
+    document.getElementById('action-close').onclick = () => finish(false);
+    dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
+    dialog.onclose = () => finish(false);
+    dialog.onkeydown = (event) => {
+      if (event.key !== 'Tab') return;
+      const controls = [...dialog.querySelectorAll('button')].filter((control) => !control.disabled && !control.hidden);
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    dialog.showModal();
+    document.getElementById('action-cancel').focus();
+    if (delaySeconds > 0) {
+      countdownTimer = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((deadline - performance.now()) / 1000));
+        submit.textContent = remaining ? `${confirmText}（${remaining} 秒）` : confirmText;
+        submit.disabled = remaining > 0;
+        if (!remaining) clearInterval(countdownTimer);
+      }, 200);
+    }
+  });
+}
+
+function confirmMoveToTrash(count, name, hiddenCount = 0) {
+  return confirmAction({
+    title: '移入回收站',
+    description: name ? `将「${name}」移入回收站？` : `将已选的 ${count} 个图标移入回收站？`,
+    detail: `${hiddenCount > 0 ? `其中 ${hiddenCount} 个不在当前页，也会一并移入。\n` : ''}图标将从图库中移除，可在回收站恢复。超过保留期限后自动清理。`,
+    confirmText: '移入回收站',
+  });
+}
+
 // 内联 SVG 图标表（Lucide 风格，统一 .icon 描边规格）
 const ICONS = {
   layers: '<svg class="icon" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg>',
@@ -21,6 +81,8 @@ const statEl = document.getElementById('stat');
 const searchInput = document.getElementById('search');
 const filterType = document.getElementById('filter-type');
 const filterCategory = document.getElementById('filter-category');
+let selectedCategories = [];
+let pendingUploadFiles = [];
 
 const modal = document.getElementById('modal');
 const modalTitle = document.getElementById('modal-title');
@@ -104,9 +166,10 @@ let pickerInitialIds = new Set();  // 打开选择器时已属于该分类的图
 let pickerCheckedIds = new Set();  // 选择器中当前勾选的图标 id
 let collapsedFolders = new Set();  // 已折叠的文件夹 id，重渲染时保持折叠状态
 let dragCounter = 0;               // 拖拽进入计数，防止子元素触发闪烁
-let selectedIconIds = new Set();    // 当前列表中已勾选的图标 id
+let selectedIconIds = new Set();    // 本次页面会话内跨页、跨筛选保留的图标 ID
+let iconsRequestSequence = 0;
 let currentPage = 1;               // 当前页码
-let pageSize = 50;                 // 每页条数（30/50/100）
+let pageSize = 100;                 // 每页条数（30/50/100/200/500）
 let totalCount = 0;                // 当前筛选下的图标总数
 let viewMode = localStorage.getItem('iconViewMode') === 'list' ? 'list' : 'grid'; // 展示方式
 
@@ -160,7 +223,8 @@ function isAllVisibleSelected() {
 }
 
 function updateSelectAllButton() {
-  btnBatchToggleAll.textContent = isAllVisibleSelected() ? '取消全选' : '全选当前页';
+  btnBatchToggleAll.textContent = isAllVisibleSelected() ? '取消当前页全选' : '全选当前页';
+  btnBatchToggleAll.disabled = getVisibleIconIds().length === 0;
 }
 
 function toggleSelectAll() {
@@ -180,7 +244,9 @@ function toggleSelectAll() {
 function updateBatchActions() {
   // 操作栏常驻显示，未选中时计数为 0 且操作按钮禁用
   const count = selectedIconIds.size;
-  batchSelectedCount.textContent = `已选 ${count} 个`;
+  const visibleCount = getVisibleIconIds().filter((id) => selectedIconIds.has(id)).length;
+  batchSelectedCount.textContent = `已选 ${count} 个${count > 0 ? `（当前页 ${visibleCount} 个）` : ''}`;
+  batchSelectedCount.title = '批量操作处理全部已选图标，包含其他页面和当前筛选外的图标';
   btnBatchMove.disabled = count === 0;
   btnBatchDownload.disabled = count === 0;
   btnBatchDelete.disabled = count === 0;
@@ -190,10 +256,20 @@ function updateBatchActions() {
 
 function clearSelection() {
   selectedIconIds.clear();
+  syncVisibleSelection();
+}
+
+function syncVisibleSelection() {
   grid.querySelectorAll('.card-select input').forEach((input) => {
-    input.checked = false;
+    input.checked = selectedIconIds.has(String(input.dataset.id));
   });
   updateBatchActions();
+}
+
+function removeCompletedSelection(ids) {
+  // 只移除此次请求处理的记录，保留请求期间新勾选的其他图标。
+  ids.forEach((id) => selectedIconIds.delete(String(id)));
+  syncVisibleSelection();
 }
 
 function setSelectedIcon(id, checked) {
@@ -203,15 +279,29 @@ function setSelectedIcon(id, checked) {
 }
 
 function populateBatchFolderSelect() {
-  const current = batchFolderSelect.value;
-  batchFolderSelect.innerHTML = '<option value="">无文件夹</option>';
-  for (const f of allFolders) {
-    const opt = document.createElement('option');
-    opt.value = f.id;
-    opt.textContent = f.name;
-    batchFolderSelect.appendChild(opt);
+  populateHierarchicalFolderSelect(batchFolderSelect);
+}
+
+// 父级后紧跟子级，完整路径区分不同父级下的同名文件夹。
+function populateHierarchicalFolderSelect(select) {
+  const current = select.value;
+  select.innerHTML = '<option value="">不归属任何文件夹</option>';
+  const visited = new Set();
+  function appendFolder(folder, parents) {
+    if (visited.has(folder.id)) return;
+    visited.add(folder.id);
+    const names = [...parents, folder.name];
+    const option = new Option('\u00a0\u00a0'.repeat(parents.length) + names.join(' / '), String(folder.id));
+    option.title = names.join(' / ');
+    option.dataset.name = folder.name;
+    option.dataset.depth = parents.length;
+    option.dataset.parent = folder.parent_id == null ? '' : String(folder.parent_id);
+    select.add(option);
+    for (const child of allFolders.filter((item) => item.parent_id === folder.id)) appendFolder(child, names);
   }
-  batchFolderSelect.value = current;
+  for (const folder of allFolders.filter((item) => !item.parent_id)) appendFolder(folder, []);
+  for (const folder of allFolders) if (!visited.has(folder.id)) appendFolder(folder, []);
+  select.value = allFolders.some((folder) => String(folder.id) === current) ? current : '';
 }
 
 function typeLabel(type) {
@@ -240,6 +330,7 @@ async function loadStats() {
   sidebarTotal.textContent = stats.total;
   const allCount = document.querySelector('.folder-item[data-id=""] .folder-count');
   if (allCount) allCount.textContent = stats.total;
+  if (window.refreshTrashCount) await window.refreshTrashCount();
 }
 
 function renderFolderTree() {
@@ -247,7 +338,7 @@ function renderFolderTree() {
 
   // 根节点：全部图标
   const allItem = document.createElement('li');
-  allItem.className = 'folder-item' + (currentFolderId === null ? ' active' : '');
+  allItem.className = 'folder-item' + (currentFolderId === null && document.getElementById('trash-content').hidden ? ' active' : '');
   allItem.dataset.id = '';
   allItem.title = '全部图标';
   allItem.innerHTML = `
@@ -293,7 +384,7 @@ function renderTreeNodes(parentEl, parentId, folders, depth) {
     node.className = 'folder-node' + (collapsed ? ' collapsed' : '');
 
     const row = document.createElement('div');
-    row.className = 'folder-item' + (currentFolderId === folder.id ? ' active' : '');
+    row.className = 'folder-item' + (currentFolderId === folder.id && document.getElementById('trash-content').hidden ? ' active' : '');
     row.dataset.id = folder.id;
     row.title = folder.name;
     row.style.setProperty('--depth', depth);
@@ -364,9 +455,9 @@ function toggleFolder(id) {
 }
 
 function selectFolder(folderId) {
+  if (window.closeTrash) window.closeTrash();
   currentFolderId = folderId;
   currentPage = 1;
-  clearSelection();
   renderFolderTree();
   loadIcons();
 }
@@ -375,6 +466,7 @@ function selectFolder(folderId) {
 function promptFolderModal(title, defaultValue) {
   return new Promise((resolve) => {
     folderModalTitle.textContent = title;
+    folderModal.querySelector('label').textContent = title.includes('分类') ? '分类名称' : '文件夹名称';
     folderNameInput.value = defaultValue || '';
     folderModal.hidden = false;
     folderNameInput.focus();
@@ -441,7 +533,7 @@ async function renameFolder(id, name) {
 }
 
 async function deleteFolder(id, name) {
-  if (!confirm(`删除文件夹「${name}」？其中的图标将移至「全部图标」，不会被删除。`)) return;
+  if (!await confirmAction({ title: '删除文件夹', description: `删除文件夹「${name}」？`, detail: '仅删除文件夹，其中的图标会保留在图库并取消文件夹归属。存在子文件夹时无法删除。', confirmText: '删除文件夹', danger: true })) return;
   try {
     const res = await fetch(`/api/folders/${id}`, { method: 'DELETE' });
     const data = await res.json();
@@ -464,24 +556,29 @@ document.getElementById('btn-new-folder').addEventListener('click', () => {
 
 // 向表单文件夹下拉填充选项
 function populateFolderSelect() {
-  const current = fFolder.value;
-  fFolder.innerHTML = '<option value="">不归属任何文件夹</option>';
-  for (const f of allFolders) {
-    const opt = document.createElement('option');
-    opt.value = f.id;
-    opt.textContent = f.name;
-    fFolder.appendChild(opt);
-  }
-  fFolder.value = current;
+  populateHierarchicalFolderSelect(fFolder);
 }
 
 // ─── 图标列表 ──────────────────────────────────────────────
 
 async function loadIcons() {
+  const requestSequence = ++iconsRequestSequence;
+  const filtered = renderFilterSummary();
+  const status = document.getElementById('list-status');
+  const statusText = document.getElementById('list-status-text');
+  const retry = document.getElementById('retry-icons');
+  grid.hidden = true;
+  emptyTip.hidden = true;
+  pagination.hidden = true;
+  status.hidden = false;
+  retry.hidden = true;
+  statusText.textContent = '正在加载图标…';
+  statEl.textContent = '加载中…';
   const params = new URLSearchParams({
     search: searchInput.value.trim(),
     type: filterType.value,
-    category: filterCategory.value,
+    sort: document.getElementById('sort-order').value,
+    categories: JSON.stringify(selectedCategories),
     page: currentPage,
     pageSize,
   });
@@ -494,16 +591,28 @@ async function loadIcons() {
   try {
     data = await apiFetch(`${API}?${params}`);
   } catch (err) {
-    toast(err.message, true);
+    if (requestSequence === iconsRequestSequence) {
+      statusText.textContent = '图标加载失败，当前条件的结果尚未显示，请重试。';
+      retry.hidden = false;
+      statEl.textContent = '加载失败';
+      toast(err.message, true);
+    }
     return;
   }
+  if (requestSequence !== iconsRequestSequence) return;
   const icons = data.icons;
   totalCount = data.total;
   // 服务端可能因越界回退页码，以返回值为准
   currentPage = data.page;
 
   grid.innerHTML = '';
-  statEl.textContent = `共 ${totalCount} 个图标`;
+  grid.hidden = false;
+  status.hidden = true;
+  statEl.textContent = `${filtered ? '匹配' : '共'} ${totalCount} 个图标`;
+  document.getElementById('empty-text').textContent = filtered
+    ? '当前筛选条件下没有匹配的图标。'
+    : '暂无图标，点击右上角「新增图标」或将图片拖拽至此开始。';
+  document.getElementById('empty-clear-filters').hidden = !filtered;
   emptyTip.hidden = icons.length > 0;
   renderPagination();
 
@@ -512,8 +621,12 @@ async function loadIcons() {
     card.className = 'card';
     card.innerHTML = `
       <label class="card-select" title="选择图标">
-        <input type="checkbox" data-id="${icon.id}" ${selectedIconIds.has(String(icon.id)) ? 'checked' : ''} />
+        <input type="checkbox" aria-label="选择${esc(icon.name)}" data-id="${icon.id}" ${selectedIconIds.has(String(icon.id)) ? 'checked' : ''} />
       </label>
+      <div class="card-actions">
+        <button type="button" class="edit" data-id="${icon.id}" title="编辑" aria-label="编辑">${ICONS.pencil}</button>
+        <button type="button" class="del" data-id="${icon.id}" title="删除" aria-label="删除">${ICONS.trash}</button>
+      </div>
       <div class="card-thumb" data-id="${icon.id}">
         ${thumbHtml(icon)}
         <span class="type-badge type-badge-${icon.type === 'symbol' ? 'symbol' : 'app'}" title="${esc(typeLabel(icon.type))}">${icon.type === 'symbol' ? 'SVG' : '图片'}</span>
@@ -522,12 +635,8 @@ async function loadIcons() {
       <div class="card-meta">
         <span class="tag tag-type type-${icon.type === 'symbol' ? 'symbol' : 'app'}">${icon.type === 'symbol' ? 'SVG' : '图片'}</span>
         ${icon.category
-          ? `<span class="tag">${esc(icon.category)}</span>`
+          ? `<span class="tag" title="${esc(icon.category)}">${esc(icon.category)}</span>`
           : '<span class="tag tag-muted">未分类</span>'}
-      </div>
-      <div class="card-actions">
-        <button class="edit" data-id="${icon.id}" title="编辑" aria-label="编辑">${ICONS.pencil}</button>
-        <button class="del" data-id="${icon.id}" title="删除" aria-label="删除">${ICONS.trash}</button>
       </div>
     `;
     grid.appendChild(card);
@@ -555,10 +664,14 @@ function renderPagination() {
   pageTotal.textContent = totalCount;
   pagePrev.disabled = currentPage <= 1;
   pageNext.disabled = currentPage >= totalPages;
-  pageNumbers.innerHTML = buildPageItems(currentPage, totalPages)
+  renderPageNumbers(pageNumbers, currentPage, totalPages);
+}
+
+function renderPageNumbers(container, current, total) {
+  container.innerHTML = buildPageItems(current, total)
     .map((item) => item === '...'
       ? '<span class="pg-dots">…</span>'
-      : `<button type="button" class="pg-num${item === currentPage ? ' cur' : ''}" data-page="${item}">${item}</button>`)
+      : `<button type="button" class="pg-num${item === current ? ' cur' : ''}" data-page="${item}"${item === current ? ' aria-current="page"' : ''}>${item}</button>`)
     .join('');
 }
 
@@ -602,32 +715,31 @@ async function loadCategories() {
   const res = await fetch('/api/categories');
   allCategories = await res.json();
 
-  // 顶部筛选下拉：保留当前选中
-  const currentFilter = filterCategory.value;
-  filterCategory.innerHTML = '<option value="">全部分类</option>';
-  // 表单分类下拉：首项「无分类」，保留当前选中
-  const currentForm = fCategory.value;
-  fCategory.innerHTML = '<option value="">无分类</option>';
-
-  for (const c of allCategories) {
-    const opt = document.createElement('option');
-    opt.value = c.name;
-    opt.textContent = c.name;
-    filterCategory.appendChild(opt);
-
-    const opt2 = document.createElement('option');
-    opt2.value = c.name;
-    opt2.textContent = c.name;
-    fCategory.appendChild(opt2);
+  selectedCategories = selectedCategories.filter((name) => name === '' || allCategories.some((c) => c.name === name));
+  renderCategoryFilter();
+  for (const select of [fCategory, document.getElementById('upload-category')]) {
+    const current = select.value;
+    select.innerHTML = '<option value="">未分类</option>';
+    for (const c of allCategories) select.add(new Option(c.name, c.name));
+    select.value = allCategories.some((c) => c.name === current) ? current : '';
   }
-  filterCategory.value = currentFilter;
-  fCategory.value = currentForm;
+}
+
+function renderCategoryFilter() {
+  filterCategory.replaceChildren();
+  for (const name of ['', ...allCategories.map((c) => c.name)]) {
+    const option = new Option(name || '未分类', name);
+    option.selected = selectedCategories.includes(name);
+    filterCategory.add(option);
+  }
+  window.refreshSelectionControls();
 }
 
 // ─── 分类字典管理 ──────────────────────────────────────────
 
 function openCategoryModal() {
   catNewInput.value = '';
+  document.getElementById('cat-search').value = '';
   renderCategoryList();
   categoryModal.hidden = false;
   catNewInput.focus();
@@ -642,17 +754,19 @@ function renderCategoryList() {
     categoryList.appendChild(empty);
     return;
   }
-  for (const c of allCategories) {
+  const keyword = document.getElementById('cat-search').value.trim().toLowerCase();
+  const matches = allCategories.filter((c) => c.name.toLowerCase().includes(keyword));
+  if (!matches.length) categoryList.innerHTML = '<li class="category-empty">没有匹配的分类</li>';
+  for (const c of matches) {
     const li = document.createElement('li');
     li.className = 'category-item';
     li.innerHTML = `
-      <span class="category-dot"></span>
       <span class="category-name" title="${esc(c.name)}">${esc(c.name)}</span>
       <span class="category-count" title="${c.icon_count} 个图标">${c.icon_count}</span>
       <span class="category-actions">
         <button class="btn btn-ghost btn-sm" data-action="manage">管理图标</button>
-        <button class="folder-action-btn" data-action="rename" title="重命名">${ICONS.pencil}</button>
-        <button class="folder-action-btn" data-action="delete" title="删除">${ICONS.trash}</button>
+        <button class="folder-action-btn" data-action="rename" title="重命名">重命名</button>
+        <button class="folder-action-btn" data-action="delete" title="删除">删除</button>
       </span>
     `;
     li.querySelector('[data-action="manage"]').addEventListener('click', () => openIconPicker(c));
@@ -667,6 +781,8 @@ function renderCategoryList() {
 }
 
 async function createCategory(name) {
+  if (catAddBtn.disabled) return false;
+  catAddBtn.disabled = true;
   try {
     await apiFetch('/api/categories', {
       method: 'POST',
@@ -677,8 +793,12 @@ async function createCategory(name) {
     catNewInput.value = '';
     await loadCategories();
     renderCategoryList();
+    return true;
   } catch (err) {
     toast(err.message, true);
+    return false;
+  } finally {
+    catAddBtn.disabled = false;
   }
 }
 
@@ -689,6 +809,9 @@ async function renameCategory(id, name) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     });
+    const previous = allCategories.find((c) => c.id === id)?.name;
+    selectedCategories = selectedCategories.map((value) => value === previous ? name : value);
+    if (fCategory.value === previous) fCategory.add(new Option(name, name, true, true));
     toast('已重命名分类');
     await loadCategories();
     renderCategoryList();
@@ -699,12 +822,14 @@ async function renameCategory(id, name) {
 }
 
 async function deleteCategory(cat) {
-  if (!confirm(`确定删除分类「${cat.name}」吗？`)) return;
+  if (!await confirmAction({ title: '删除分类', description: `删除分类「${cat.name}」？`, detail: '仅删除分类，不删除图片。仍有正常图库图标使用的分类无法删除，请先调整图标归属。', confirmText: '删除分类', danger: true })) return;
   try {
     await apiFetch(`/api/categories/${cat.id}`, { method: 'DELETE' });
     toast('已删除分类');
     await loadCategories();
     renderCategoryList();
+    currentPage = 1;
+    await loadIcons();
   } catch (err) {
     toast(err.message, true);
   }
@@ -716,6 +841,7 @@ async function openIconPicker(cat) {
   pickerCategoryName = cat.name;
   pickerTitle.textContent = `管理「${cat.name}」的图标`;
   pickerSearch.value = '';
+  pickerSelectedExpanded = false;
   iconPickerModal.hidden = false;
   pickerGrid.innerHTML = '<div class="picker-loading">加载中…</div>';
   pickerEmpty.hidden = true;
@@ -747,11 +873,38 @@ function getPickerList() {
     : available;
 }
 
+let pickerSelectedExpanded = false;
+
 function renderPickerGrid() {
   const list = getPickerList();
 
   pickerGrid.innerHTML = '';
   pickerEmpty.hidden = list.length > 0;
+  const selected = list.filter((icon) => pickerCheckedIds.has(String(icon.id)));
+  const unselected = list.filter((icon) => !pickerCheckedIds.has(String(icon.id)));
+  const details = document.createElement('details');
+  details.className = 'picker-selected-group';
+  details.open = pickerSelectedExpanded;
+  const summary = document.createElement('summary');
+  summary.textContent = `已选择（${selected.length}）`;
+  details.append(summary);
+  details.addEventListener('toggle', () => { if (details.isConnected) pickerSelectedExpanded = details.open; });
+  const selectedGrid = document.createElement('div');
+  selectedGrid.className = 'picker-group-grid';
+  details.append(selectedGrid);
+  pickerGrid.append(details);
+  const heading = document.createElement('h3');
+  heading.className = 'picker-group-heading';
+  heading.textContent = `未选择（${unselected.length}）`;
+  const unselectedGrid = document.createElement('div');
+  unselectedGrid.className = 'picker-group-grid';
+  pickerGrid.append(heading, unselectedGrid);
+  if (!unselected.length) {
+    const empty = document.createElement('p');
+    empty.className = 'category-help';
+    empty.textContent = '当前搜索范围内没有未选择的图标。';
+    unselectedGrid.append(empty);
+  }
 
   for (const icon of list) {
     const id = String(icon.id);
@@ -768,10 +921,9 @@ function renderPickerGrid() {
     input.addEventListener('change', () => {
       if (input.checked) pickerCheckedIds.add(id);
       else pickerCheckedIds.delete(id);
-      cell.classList.toggle('checked', input.checked);
-      updatePickerSelected();
+      renderPickerGrid();
     });
-    pickerGrid.appendChild(cell);
+    (checked ? selectedGrid : unselectedGrid).appendChild(cell);
   }
   updatePickerSelected();
 }
@@ -779,23 +931,21 @@ function renderPickerGrid() {
 function updatePickerSelected() {
   pickerSelected.textContent = `已选 ${pickerCheckedIds.size} 个`;
   pickerSelected.classList.toggle('is-active', pickerCheckedIds.size > 0);
-  // 当前可见图标是否已全部勾选，决定按钮文案与禁用态
-  const list = getPickerList();
-  const allChecked = list.length > 0 && list.every((i) => pickerCheckedIds.has(String(i.id)));
-  pickerSelectAll.textContent = allChecked ? '取消全选' : '全选当前';
-  pickerSelectAll.disabled = list.length === 0;
+  const unselected = getPickerList().filter((icon) => !pickerCheckedIds.has(String(icon.id)));
+  pickerSelectAll.textContent = '全选未选择';
+  pickerSelectAll.disabled = unselected.length === 0;
 }
 
-// 一键勾选/取消当前可见图标（受搜索过滤影响）
+// 只添加当前搜索范围内的未选图标，不影响收起的已选分组。
 function togglePickerSelectAll() {
-  const list = getPickerList();
-  if (!list.length) return;
-  const allChecked = list.every((i) => pickerCheckedIds.has(String(i.id)));
-  for (const icon of list) {
-    const id = String(icon.id);
-    if (allChecked) pickerCheckedIds.delete(id);
-    else pickerCheckedIds.add(id);
-  }
+  const candidates = getPickerList().filter((icon) => !pickerCheckedIds.has(String(icon.id)));
+  if (!candidates.length) return;
+  const scope = pickerSearch.value.trim() ? '当前搜索结果' : '当前可选范围';
+  const message = `将勾选${scope}中尚未选择的 ${candidates.length} 个图标。\n` +
+    `已选 ${pickerCheckedIds.size} 个，确认后共 ${pickerCheckedIds.size + candidates.length} 个。\n` +
+    `点击“保存”后才会归入「${pickerCategoryName}」。是否继续？`;
+  if (!confirm(message)) return;
+  for (const icon of candidates) pickerCheckedIds.add(String(icon.id));
   renderPickerGrid();
 }
 
@@ -847,7 +997,7 @@ async function moveSelectedIcons() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '迁移失败');
     toast(`已迁移 ${data.updated} 个图标`);
-    clearSelection();
+    removeCompletedSelection(ids);
     await loadFolders();
     await loadStats();
     await loadIcons();
@@ -859,7 +1009,8 @@ async function moveSelectedIcons() {
 async function deleteSelectedIcons() {
   const ids = [...selectedIconIds].map(Number);
   if (!ids.length) return;
-  if (!confirm(`确定删除选中的 ${ids.length} 个图标吗？此操作不可恢复。`)) return;
+  const visibleCount = getVisibleIconIds().filter((id) => selectedIconIds.has(id)).length;
+  if (!await confirmMoveToTrash(ids.length, null, ids.length - visibleCount)) return;
 
   try {
     const res = await fetch('/api/icons/batch', {
@@ -869,8 +1020,8 @@ async function deleteSelectedIcons() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '删除失败');
-    toast(`已删除 ${data.deleted} 个图标`);
-    clearSelection();
+    toast(`已将 ${data.deleted} 个图标移入回收站`);
+    removeCompletedSelection(ids);
     await loadCategories();
     await loadFolders();
     await loadStats();
@@ -937,6 +1088,7 @@ function openModal(icon) {
     // 新增时默认归属当前文件夹
     fFolder.value = currentFolderId || '';
   }
+  window.refreshSelectionControls();
   modal.hidden = false;
 }
 
@@ -987,13 +1139,13 @@ form.addEventListener('submit', async (e) => {
 
 async function removeIcon(icon) {
   if (!icon) return;
-  if (!confirm(`确定删除「${icon.name}」吗？此操作不可恢复。`)) return;
+  if (!await confirmMoveToTrash(1, icon.name)) return;
   try {
     const res = await fetch(`${API}/${icon.id}`, { method: 'DELETE' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '删除失败');
     selectedIconIds.delete(String(icon.id));
-    toast('已删除');
+    toast('已移入回收站');
     await loadCategories();
     await loadFolders();
     await loadStats();
@@ -1073,7 +1225,8 @@ function addBatchItem(name, status, isOk) {
 }
 
 // 分片上传：每次最多 10 个文件，避免请求体过大
-async function handleBatchFiles(files) {
+async function handleBatchFiles(files, destination) {
+  if (!destination) { prepareBatchUpload(files); return; }
   if (!files || !files.length) return;
   openBatchModal();
 
@@ -1086,7 +1239,8 @@ async function handleBatchFiles(files) {
     const chunk = fileArr.slice(i, i + CHUNK);
     const fd = new FormData();
     for (const f of chunk) fd.append('files', f);
-    if (currentFolderId !== null) fd.append('folder_id', currentFolderId);
+    fd.append('folder_id', destination.folder);
+    fd.append('category', destination.category);
 
     try {
       const res = await fetch('/api/icons/batch', { method: 'POST', body: fd });
@@ -1244,6 +1398,58 @@ viewList.addEventListener('click', () => setViewMode('list'));
 
 // ─── 事件绑定 ──────────────────────────────────────────────
 
+function applyFilterChange() {
+  clearTimeout(debounceTimer);
+  currentPage = 1;
+  renderFolderTree();
+  renderCategoryFilter();
+  loadIcons();
+}
+
+function clearFilters() {
+  searchInput.value = '';
+  filterType.value = '';
+  selectedCategories = [];
+  currentFolderId = null;
+  applyFilterChange();
+}
+
+function renderFilterSummary() {
+  const chips = document.getElementById('filter-chips');
+  chips.replaceChildren();
+  function add(label, clear) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'filter-chip';
+    button.textContent = `${label} ×`;
+    button.setAttribute('aria-label', `移除筛选：${label}`);
+    button.addEventListener('click', () => { clear(); applyFilterChange(); });
+    chips.append(button);
+  }
+  if (currentFolderId !== null) {
+    const names = [];
+    const visited = new Set();
+    let folder = allFolders.find((item) => item.id === currentFolderId);
+    while (folder && !visited.has(folder.id)) {
+      visited.add(folder.id);
+      names.unshift(folder.name);
+      folder = allFolders.find((item) => item.id === folder.parent_id);
+    }
+    add(`文件夹：${names.join(' / ') || '所选文件夹'}（含子文件夹）`, () => { currentFolderId = null; });
+  }
+  if (searchInput.value.trim()) add(`搜索：${searchInput.value.trim()}`, () => { searchInput.value = ''; });
+  if (filterType.value) add(`类型：${typeLabel(filterType.value)}`, () => { filterType.value = ''; });
+  for (const name of selectedCategories) {
+    add(`分类：${name || '未分类'}`, () => { selectedCategories = selectedCategories.filter((value) => value !== name); });
+  }
+  const filtered = chips.children.length > 0;
+  document.getElementById('filter-summary').hidden = !filtered;
+  return filtered;
+}
+
+document.getElementById('clear-filters').addEventListener('click', clearFilters);
+document.getElementById('empty-clear-filters').addEventListener('click', clearFilters);
+document.getElementById('retry-icons').addEventListener('click', loadIcons);
 document.getElementById('btn-add').addEventListener('click', () => openModal(null));
 document.getElementById('modal-close').addEventListener('click', closeModal);
 document.getElementById('form-cancel').addEventListener('click', closeModal);
@@ -1257,18 +1463,21 @@ searchInput.addEventListener('input', () => {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     currentPage = 1;
-    clearSelection();
     loadIcons();
   }, 250);
 });
+document.getElementById('sort-order').addEventListener('change', () => {
+  currentPage = 1;
+  loadIcons();
+});
 filterType.addEventListener('change', () => {
   currentPage = 1;
-  clearSelection();
   loadIcons();
 });
 filterCategory.addEventListener('change', () => {
+  selectedCategories = Array.from(filterCategory.selectedOptions, (option) => option.value);
+  renderCategoryFilter();
   currentPage = 1;
-  clearSelection();
   loadIcons();
 });
 
@@ -1311,4 +1520,58 @@ async function init() {
   await loadIcons();
 }
 
+window.initSelectionControls();
+loadAppVersion();
 init();
+
+async function loadAppVersion() {
+  const label = document.getElementById('app-version');
+  try {
+    const response = await fetch('/api/version', { cache: 'no-store' });
+    if (!response.ok) throw new Error('版本读取失败');
+    const { version } = await response.json();
+    if (typeof version !== 'string' || !version.trim()) throw new Error('版本信息无效');
+    label.textContent = `v${version}`;
+    label.title = `当前服务端软件版本：${version}`;
+  } catch {
+    label.textContent = '版本未知';
+    label.title = '无法读取软件版本，请确认服务端已更新并重启。';
+  }
+}
+
+// 批量上传先确认归属，避免选中文件后直接写入。
+function prepareBatchUpload(files) {
+  pendingUploadFiles = Array.from(files || []);
+  if (!pendingUploadFiles.length) return;
+  const folder = document.getElementById('upload-folder');
+  folder.innerHTML = document.getElementById('f-folder').innerHTML;
+  folder.value = currentFolderId === null ? '' : String(currentFolderId);
+  const category = document.getElementById('upload-category');
+  category.value = selectedCategories.length === 1 ? selectedCategories[0] : '';
+  document.getElementById('upload-file-summary').textContent = `已选择 ${pendingUploadFiles.length} 个文件：${pendingUploadFiles.map((file) => file.name).join('、')}`;
+  window.refreshSelectionControls();
+  document.getElementById('upload-options-modal').hidden = false;
+}
+function cancelBatchUpload() {
+  pendingUploadFiles = [];
+  document.getElementById('upload-options-modal').hidden = true;
+}
+document.getElementById('upload-options-close').addEventListener('click', cancelBatchUpload);
+document.getElementById('upload-options-cancel').addEventListener('click', cancelBatchUpload);
+document.getElementById('upload-options-submit').addEventListener('click', () => {
+  const files = pendingUploadFiles;
+  const destination = { folder: document.getElementById('upload-folder').value, category: document.getElementById('upload-category').value };
+  cancelBatchUpload();
+  handleBatchFiles(files, destination);
+});
+document.getElementById('cat-search').addEventListener('input', renderCategoryList);
+document.querySelectorAll('[data-quick-category]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const name = await promptFolderModal('新建分类', '');
+    if (!name || !name.trim()) return;
+    if (await createCategory(name.trim())) {
+      document.getElementById(button.dataset.quickCategory).value = name.trim();
+      window.refreshSelectionControls();
+    }
+  });
+});

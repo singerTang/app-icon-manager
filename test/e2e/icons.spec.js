@@ -60,15 +60,17 @@ test.describe('新增图标', () => {
 
     await page.click('#btn-add');
     await page.fill('#f-name', 'E2E-应用图标');
-    await page.selectOption('#f-type', 'app');
-    await page.selectOption('#f-category', { label: 'E2E测试' });
+    await page.click('#f-type-trigger');
+    await page.getByRole('option', { name: '图片', exact: true }).click();
+    await page.click('#f-category-trigger');
+    await page.getByRole('option', { name: 'E2E测试', exact: true }).click();
     await page.fill('#f-tags', 'e2e,playwright');
     await page.fill('#f-version', '3.0.0');
     await page.click('#form-submit');
 
     await expect(page.locator('#modal')).toBeHidden();
     await expect(page.locator('.card-name', { hasText: 'E2E-应用图标' })).toBeVisible();
-    await expect(page.locator('.card-name', { hasText: 'E2E-应用图标' }).locator('..').locator('.tag.type-app')).toBeVisible();
+    await expect(page.locator('.card-name', { hasText: 'E2E-应用图标' }).locator('..').locator('.type-badge-app')).toBeVisible();
 
     // Toast 提示出现
     await expect(page.locator('#toast')).toContainText('已新增');
@@ -83,11 +85,12 @@ test.describe('新增图标', () => {
 
     await page.click('#btn-add');
     await page.fill('#f-name', 'E2E-SVG符号');
-    await page.selectOption('#f-type', 'symbol');
+    await page.click('#f-type-trigger');
+    await page.getByRole('option', { name: 'SVG', exact: true }).click();
     await page.click('#form-submit');
 
     await expect(page.locator('#modal')).toBeHidden();
-    await expect(page.locator('.card-name', { hasText: 'E2E-SVG符号' }).locator('..').locator('.tag.type-symbol')).toBeVisible();
+    await expect(page.locator('.card-name', { hasText: 'E2E-SVG符号' }).locator('..').locator('.type-badge-symbol')).toBeVisible();
 
     const icon = await (await fetch(`${BASE_API}/icons?search=E2E-SVG符号`)).json();
     if (icon[0]) await deleteIcon(request, icon[0].id);
@@ -162,7 +165,8 @@ test.describe('类型筛选', () => {
 
   test('选择"应用图标"只显示 app 类型卡片', async ({ page }) => {
     await page.goto('/');
-    await page.selectOption('#filter-type', 'app');
+    await page.click('#filter-type-trigger');
+    await page.getByRole('option', { name: '图片', exact: true }).click();
     await page.waitForLoadState('networkidle');
     const tags = page.locator('.tag.type-symbol');
     await expect(tags).toHaveCount(0);
@@ -170,7 +174,8 @@ test.describe('类型筛选', () => {
 
   test('选择"SVG 符号"只显示 symbol 类型卡片', async ({ page }) => {
     await page.goto('/');
-    await page.selectOption('#filter-type', 'symbol');
+    await page.click('#filter-type-trigger');
+    await page.getByRole('option', { name: 'SVG', exact: true }).click();
     await page.waitForLoadState('networkidle');
     const tags = page.locator('.tag.type-app');
     await expect(tags).toHaveCount(0);
@@ -209,6 +214,7 @@ test.describe('编辑图标', () => {
     await page.click('#form-submit');
 
     await expect(page.locator('#modal')).toBeHidden();
+    await page.fill('#search', 'E2E-已编辑');
     await expect(page.locator('.card-name', { hasText: 'E2E-已编辑' })).toBeVisible();
     await expect(page.locator('#toast')).toContainText('已更新');
   });
@@ -226,13 +232,12 @@ test.describe('删除图标', () => {
     const countBefore = await page.locator('.card').count();
     expect(countBefore).toBe(1);
 
-    // 监听 dialog，自动确认
-    page.once('dialog', (dialog) => dialog.accept());
     await page.locator('.del').first().click();
+    await page.locator('#action-submit').click();
 
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.empty')).toBeVisible();
-    await expect(page.locator('#toast')).toContainText('已删除');
+    await expect(page.locator('#toast')).toContainText('已移入回收站');
   });
 
   test('取消删除确认，图标保留', async ({ page, request }) => {
@@ -241,9 +246,8 @@ test.describe('删除图标', () => {
     await page.fill('#search', 'E2E-不删除图标');
     await page.waitForTimeout(400);
 
-    // 拒绝 dialog
-    page.once('dialog', (dialog) => dialog.dismiss());
     await page.locator('.del').first().click();
+    await page.locator('#action-cancel').click();
 
     await page.waitForTimeout(300);
     await expect(page.locator('.card')).toHaveCount(1);

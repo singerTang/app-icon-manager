@@ -63,6 +63,10 @@ before(async () => {
 
 // 关闭服务器并清理测试数据库
 after(async () => {
+  // 删除改为回收站后，测试结束需彻底清理自己的上传文件。
+  const remaining = await api('GET', '/api/icons');
+  if (remaining.data.length) await api('DELETE', '/api/icons/batch', { ids: remaining.data.map((row) => row.id) });
+  await api('POST', '/api/trash/empty', { confirm: '清空回收站' });
   serverProcess.kill('SIGTERM');
   await new Promise((r) => setTimeout(r, 600));
   for (const f of [TEST_DB, TEST_DB_WAL, TEST_DB_SHM]) {
@@ -71,6 +75,15 @@ after(async () => {
 });
 
 // ─── 列表（初始空库）────────────────────────────────────────
+describe('GET /api/version', () => {
+  it('返回软件版本且禁止缓存，不暴露配置', async () => {
+    const response = await fetch(`${BASE}/api/version`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await response.json(), { version: require('../package.json').version });
+  });
+});
+
 describe('GET /api/icons', () => {
   it('初始列表应为空数组', async () => {
     const { status, data } = await api('GET', '/api/icons');
@@ -375,5 +388,147 @@ describe('POST /api/import', () => {
     const { status, data } = await api('POST', '/api/import', { wrong: true });
     assert.equal(status, 400);
     assert.ok(data.error);
+  });
+});
+
+
+describe('分类多选与批量上传归属', () => {
+  const names = ['筛选回归甲', '筛选回归乙'];
+  const ids = [];
+  let folder;
+  before(async () => {
+    folder = (await api('POST', '/api/folders', { name: '分类回归文件夹' })).data;
+    for (const category of [...names, '']) {
+      const fd = new FormData();
+      fd.append('name', '分类回归图标');
+      fd.append('category', category);
+      fd.append('folder_id', folder.id);
+      const { data } = await api('POST', '/api/icons', fd);
+      ids.push(data.id);
+    }
+  });
+  after(async () => {
+    for (const id of ids) await api('DELETE', `/api/icons/${id}`);
+    await api('DELETE', `/api/folders/${folder.id}`);
+  });
+  it('多分类取并集，与文件夹和分页共同生效', async () => {
+    const query = new URLSearchParams({ categories: JSON.stringify(names), folder_id: folder.id, page: 1 });
+    const { data } = await api('GET', `/api/icons?${query}`);
+    assert.equal(data.total, 2);
+    assert.deepEqual(new Set(data.icons.map((icon) => icon.category)), new Set(names));
+  });
+  it('未分类可单独筛选，也可与指定分类组合', async () => {
+    for (const values of [[''], ['', names[0]]]) {
+      const query = new URLSearchParams({ categories: JSON.stringify(values), folder_id: folder.id });
+      const { data } = await api('GET', `/api/icons?${query}`);
+      assert.equal(data.length, values.length);
+      assert.ok(data.every((icon) => values.includes(icon.category)));
+    }
+  });
+  it('非法分类筛选返回 400，特殊名称不会扩展查询范围', async () => {
+    for (const value of ['bad', '{}', '[1]']) {
+      assert.equal((await api('GET', `/api/icons?categories=${encodeURIComponent(value)}`)).status, 400);
+    }
+    const query = new URLSearchParams({ categories: JSON.stringify(["' OR 1=1 --"]) });
+    assert.deepEqual((await api('GET', `/api/icons?${query}`)).data, []);
+  });
+  it('批量文件统一保存分类和文件夹，失效分类拒绝写入', async () => {
+    for (const category of [names[0], '不存在的回归分类']) {
+      const fd = new FormData();
+      fd.append('category', category);
+      fd.append('folder_id', folder.id);
+      for (const name of ['甲.svg', '乙.svg']) fd.append('files', new Blob(['<svg xmlns="http://www.w3.org/2000/svg"/>'], { type: 'image/svg+xml' }), name);
+      const result = await api('POST', '/api/icons/batch', fd);
+      if (category === names[0]) {
+        assert.equal(result.status, 201);
+        assert.equal(result.data.icons.length, 2);
+        for (const icon of result.data.icons) {
+          ids.push(icon.id);
+          assert.equal(icon.category, category);
+          assert.equal(icon.folder_id, folder.id);
+        }
+      } else {
+        assert.equal(result.status, 400);
+        const query = new URLSearchParams({ category });
+        assert.deepEqual((await api('GET', `/api/icons?${query}`)).data, []);
+      }
+    }
+  });
+});
+
+
+describe('排序与默认分页', () => {
+  it('同名归组在筛选后、分页前计算，普通上传排序仍独立', async () => {
+    const marker = '同名归组专项';
+    const query = `/api/icons?search=${marker}`;
+    const imported = await api('POST', '/api/import', { icons: [
+      ...Array.from({ length: 32 }, (_, index) => ({ name: '同名甲', file_path: `/uploads/__grouped_sort_fixture_${index}.svg`, tags: marker + '可见', category: marker, created_at: '2025-01-01T00:00:00.000Z' })),
+      { name: '同名乙', tags: marker + '可见', category: marker, created_at: '2025-02-01T00:00:00.000Z' },
+      { name: '同名甲', tags: marker, type: 'symbol', created_at: '2025-03-01T00:00:00.000Z' },
+    ] });
+    assert.equal(imported.status, 200);
+    const list = (await api('GET', query)).data;
+    try {
+      assert.equal(list.length, 34);
+      assert.deepEqual(list.map((row) => row.name), [...Array(33).fill('同名甲'), '同名乙']);
+      assert.equal(list[0].type, 'symbol');
+      assert.ok(list[1].id > list[2].id);
+      const page1 = (await api('GET', query + '&sort=grouped&page=1&pageSize=30')).data;
+      const page2 = (await api('GET', query + '&sort=grouped&page=2&pageSize=30')).data;
+      assert.equal(page1.total, 34);
+      assert.deepEqual([...page1.icons, ...page2.icons].map((row) => row.id), list.map((row) => row.id));
+      for (const filter of ['&type=app', '&categories=' + encodeURIComponent(JSON.stringify([marker])), '&search=' + encodeURIComponent(marker + '可见')]) {
+        const filteredQuery = filter.startsWith('&search=') ? '/api/icons?' + filter.slice(1) : query + filter;
+        const filtered = (await api('GET', filteredQuery)).data;
+        assert.equal(filtered.length, 33);
+        assert.equal(filtered[0].name, '同名乙', '被筛掉的新图不能抬高同名组的排序');
+      }
+      const created = (await api('GET', query + '&sort=created')).data;
+      assert.deepEqual(created.slice(0, 2).map((row) => row.name), ['同名甲', '同名乙']);
+      await api('PUT', `/api/icons/${list.at(-1).id}`, { description: '修改不改变上传顺序' });
+      assert.deepEqual((await api('GET', query)).data.map((row) => row.id), list.map((row) => row.id));
+    } finally {
+      for (const row of list) await api('DELETE', `/api/icons/${row.id}`);
+    }
+  });
+  let rows;
+  const marker = '排序回归专用';
+  before(async () => {
+    await api('POST', '/api/import', { icons: [
+      { name: 'B', tags: marker, created_at: '2025-01-01T00:00:00.000Z' },
+      { name: 'A', tags: marker, created_at: '2025-02-01T00:00:00.000Z' },
+      { name: 'A', type: 'symbol', tags: marker, created_at: '2025-02-01T00:00:00.000Z' },
+    ] });
+    rows = (await api('GET', `/api/icons?search=${marker}`)).data;
+  });
+  after(async () => { for (const row of rows) await api('DELETE', `/api/icons/${row.id}`); });
+  it('默认每页 100，时间相同按 ID 倒序', async () => {
+    const { data } = await api('GET', `/api/icons?search=${marker}&page=1`);
+    assert.equal(data.pageSize, 100);
+    assert.deepEqual(data.icons.map((row) => row.name), ['A', 'A', 'B']);
+    assert.ok(data.icons[0].id > data.icons[1].id);
+  });
+  it('修改分类不影响最近上传排序，最近修改排序会更新', async () => {
+    const old = rows.find((row) => row.name === 'B');
+    await api('PUT', `/api/icons/${old.id}`, { category: '排序测试分类' });
+    const created = (await api('GET', `/api/icons?search=${marker}&sort=created`)).data;
+    const updated = (await api('GET', `/api/icons?search=${marker}&sort=updated`)).data;
+    assert.equal(created.at(-1).id, old.id);
+    assert.equal(updated[0].id, old.id);
+  });
+  it('名称排序分组，分页与不分页使用相同顺序', async () => {
+    const query = `/api/icons?search=${marker}&sort=name`;
+    const list = (await api('GET', query)).data;
+    const paged = (await api('GET', query + '&page=1')).data.icons;
+    assert.deepEqual(list.map((row) => row.name), ['A', 'A', 'B']);
+    assert.deepEqual(paged.map((row) => row.id), list.map((row) => row.id));
+  });
+  it('支持 200、500 档，拒绝非法排序参数', async () => {
+    for (const size of [200, 500]) {
+      assert.equal((await api('GET', `/api/icons?page=1&pageSize=${size}`)).data.pageSize, size);
+    }
+    for (const sort of ['unknown', 'constructor', 'created_at DESC; DROP TABLE icons']) {
+      assert.equal((await api('GET', '/api/icons?sort=' + encodeURIComponent(sort))).status, 400);
+    }
   });
 });

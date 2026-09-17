@@ -67,11 +67,24 @@ db.exec(`
   );
 `);
 
+// 回收站采用原表软删除，旧记录默认仍在正常图库。
+const iconColumns = new Set(db.prepare('PRAGMA table_info(icons)').all().map((column) => column.name));
+db.transaction(() => {
+  for (const column of ['deleted_at', 'purge_after', 'deleted_folder_path', 'deleted_category']) {
+    if (!iconColumns.has(column)) db.exec(`ALTER TABLE icons ADD COLUMN ${column} TEXT DEFAULT NULL`);
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_icons_purge ON icons(purge_after);
+    CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT OR IGNORE INTO app_settings (key, value) VALUES ('trash_retention_days', '30');
+  `);
+})();
+
 // 启动时补种字典：将图标在用分类同步进字典（INSERT OR IGNORE 幂等，只增不删）
 // 保证「任何被图标使用中的分类必然存在于字典」这一不变式
 db.prepare(
   `INSERT OR IGNORE INTO categories (name, created_at)
-   SELECT DISTINCT category, ? FROM icons WHERE category != ''`
+   SELECT DISTINCT category, ? FROM icons WHERE category != '' AND deleted_at IS NULL`
 ).run(new Date().toISOString());
 
 // 兼容旧库：为 icons 表追加 folder_id 列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）

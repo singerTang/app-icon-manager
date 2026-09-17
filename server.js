@@ -17,13 +17,19 @@ const { sanitizeSvg } = require('./lib/ai/sanitize-svg');
 const db = require('./db');
 
 const app = express();
+const { version: appVersion } = require('./package.json');
 const PORT = process.env.PORT || 3000;
+
+app.get('/api/version', (req, res) => {
+  res.set('Cache-Control', 'no-store').json({ version: appVersion });
+});
 
 // 上传目录，首次运行自动创建
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
+const trash = require('./lib/trash')(db, uploadDir);
 
 // 允许的图标文件类型
 const ALLOWED_EXT = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'];
@@ -154,6 +160,7 @@ function removeUploadedFile(file) {
 // 删除磁盘上的图标文件（file_path 形如 /uploads/xxx）
 function removeFileByPath(filePath) {
   if (!filePath) return;
+  if (db.prepare('SELECT 1 FROM icons WHERE file_path = ?').get(filePath)) return;
   const name = path.basename(filePath);
   const abs = path.join(uploadDir, name);
   if (fs.existsSync(abs)) {
@@ -196,7 +203,7 @@ app.get('/api/folders', (req, res) => {
     .prepare(
       `SELECT f.*, COUNT(i.id) AS icon_count
          FROM folders f
-         LEFT JOIN icons i ON i.folder_id = f.id
+         LEFT JOIN icons i ON i.folder_id = f.id AND i.deleted_at IS NULL
         GROUP BY f.id
         ORDER BY f.parent_id, f.name`
     )
@@ -206,8 +213,8 @@ app.get('/api/folders', (req, res) => {
 
 // 全局统计：图标总数与未归类数量，用于侧栏「全部图标」与底部统计
 app.get('/api/stats', (req, res) => {
-  const total = db.prepare('SELECT COUNT(*) AS n FROM icons').get().n;
-  const unfiled = db.prepare('SELECT COUNT(*) AS n FROM icons WHERE folder_id IS NULL').get().n;
+  const total = db.prepare('SELECT COUNT(*) AS n FROM icons WHERE deleted_at IS NULL').get().n;
+  const unfiled = db.prepare('SELECT COUNT(*) AS n FROM icons WHERE folder_id IS NULL AND deleted_at IS NULL').get().n;
   res.json({ total, unfiled });
 });
 
@@ -255,7 +262,7 @@ app.delete('/api/folders/:id', (req, res) => {
   }
 
   db.transaction(() => {
-    db.prepare('UPDATE icons SET folder_id = NULL WHERE folder_id = ?').run(id);
+    db.prepare('UPDATE icons SET folder_id = NULL WHERE folder_id = ? AND deleted_at IS NULL').run(id);
     db.prepare('DELETE FROM folders WHERE id = ?').run(id);
   })();
   res.json({ success: true });
@@ -277,9 +284,15 @@ app.post('/api/icons/batch', upload.array('files', 50), (req, res) => {
   const folder_id = folder.value;
   const type = ALLOWED_TYPES.includes(req.body.type) ? req.body.type : null;
 
+  const category = String(req.body.category || '').trim();
+  if (category && !db.prepare('SELECT 1 FROM categories WHERE name = ?').get(category)) {
+    files.forEach(removeUploadedFile);
+    return res.status(400).json({ error: '分类不存在，请刷新后重新选择' });
+  }
+
   const insert = db.prepare(
     `INSERT INTO icons (name, type, category, tags, file_path, file_type, description, version, folder_id, created_at, updated_at)
-     VALUES (?, ?, '', '', ?, ?, '', '1.0.0', ?, ?, ?)`
+     VALUES (?, ?, ?, '', ?, ?, '', '1.0.0', ?, ?, ?)`
   );
 
   const results = db.transaction(() => {
@@ -289,7 +302,7 @@ app.post('/api/icons/batch', upload.array('files', 50), (req, res) => {
       const baseName = path.basename(originalName, path.extname(originalName));
       const iconType = type || (ext === 'svg' ? 'symbol' : 'app');
       const ts = now();
-      const info = insert.run(baseName, iconType, `/uploads/${file.filename}`, ext, folder_id, ts, ts);
+      const info = insert.run(baseName, iconType, category, `/uploads/${file.filename}`, ext, folder_id, ts, ts);
       return db.prepare('SELECT * FROM icons WHERE id = ?').get(info.lastInsertRowid);
     });
   })();
@@ -520,7 +533,7 @@ app.post('/api/icons/ai-save', (req, res, next) => {
 // 列表查询，支持 search / type / category / folder_id 筛选
 app.get('/api/icons', (req, res) => {
   const { search = '', type = '', category = '', folder_id = '', folder_ids = '' } = req.query;
-  const conditions = [];
+  const conditions = ['deleted_at IS NULL'];
   const params = [];
 
   if (search) {
@@ -532,7 +545,17 @@ app.get('/api/icons', (req, res) => {
     conditions.push('type = ?');
     params.push(type);
   }
-  if (category) {
+  if (req.query.categories !== undefined) {
+    let categories;
+    try { categories = JSON.parse(req.query.categories); } catch { return res.status(400).json({ error: '分类筛选格式错误' }); }
+    if (!Array.isArray(categories) || categories.length > 200 || categories.some((value) => typeof value !== 'string')) {
+      return res.status(400).json({ error: '分类筛选必须是字符串数组，最多 200 项' });
+    }
+    if (categories.length) {
+      conditions.push(`COALESCE(category, '') IN (${categories.map(() => '?').join(',')})`);
+      params.push(...categories);
+    }
+  } else if (category) {
     conditions.push('category = ?');
     params.push(category);
   }
@@ -552,12 +575,24 @@ app.get('/api/icons', (req, res) => {
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  // 排序使用固定 SQL，时间相同时以唯一 ID 保持分页顺序稳定。
+  const sortOrders = new Map([
+    // 窗口函数只计算筛选后的同名组，并在分页之前完成排序。
+    ['grouped', 'MAX(created_at) OVER (PARTITION BY name) DESC, name COLLATE BINARY ASC, created_at DESC, id DESC'],
+    ['created', 'created_at DESC, id DESC'],
+    ['updated', 'updated_at DESC, id DESC'],
+    ['name', 'name COLLATE NOCASE ASC, created_at DESC, id DESC'],
+  ]);
+  const sort = req.query.sort === undefined ? 'grouped' : req.query.sort;
+  if (!sortOrders.has(sort)) return res.status(400).json({ error: '不支持的排序方式' });
+  const orderBy = sortOrders.get(sort);
+
 
   // 按需分页：带 page 参数时返回 { total, page, pageSize, icons }，
   // 否则维持返回数组（向后兼容既有调用方）
   if (req.query.page !== undefined) {
-    const PAGE_SIZES = [30, 50, 100];
-    const pageSize = PAGE_SIZES.includes(Number(req.query.pageSize)) ? Number(req.query.pageSize) : 30;
+    const PAGE_SIZES = [30, 50, 100, 200, 500];
+    const pageSize = PAGE_SIZES.includes(Number(req.query.pageSize)) ? Number(req.query.pageSize) : 100;
     const total = db.prepare(`SELECT COUNT(*) AS n FROM icons ${where}`).get(...params).n;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     let page = Number(req.query.page);
@@ -565,13 +600,13 @@ app.get('/api/icons', (req, res) => {
     if (page > totalPages) page = totalPages;
     const offset = (page - 1) * pageSize;
     const icons = db
-      .prepare(`SELECT * FROM icons ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
+      .prepare(`SELECT * FROM icons ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`)
       .all(...params, pageSize, offset);
     return res.json({ total, page, pageSize, icons });
   }
 
   const rows = db
-    .prepare(`SELECT * FROM icons ${where} ORDER BY updated_at DESC`)
+    .prepare(`SELECT * FROM icons ${where} ORDER BY ${orderBy}`)
     .all(...params);
   res.json(rows);
 });
@@ -618,7 +653,7 @@ app.post('/api/icons', upload.single('file'), (req, res) => {
 // 编辑图标（可选替换文件）
 app.put('/api/icons/:id', upload.single('file'), (req, res) => {
   const id = Number(req.params.id);
-  const existing = db.prepare('SELECT * FROM icons WHERE id = ?').get(id);
+  const existing = db.prepare('SELECT * FROM icons WHERE id = ? AND deleted_at IS NULL').get(id);
   if (!existing) {
     removeUploadedFile(req.file);
     return res.status(404).json({ error: '图标不存在' });
@@ -645,8 +680,6 @@ app.put('/api/icons/:id', upload.single('file'), (req, res) => {
   let filePath = existing.file_path;
   let fileType = existing.file_type;
   if (req.file) {
-    // 替换文件时删除旧文件
-    removeFileByPath(existing.file_path);
     filePath = `/uploads/${req.file.filename}`;
     fileType = path.extname(req.file.filename).slice(1).toLowerCase();
   }
@@ -665,6 +698,7 @@ app.put('/api/icons/:id', upload.single('file'), (req, res) => {
     `UPDATE icons SET name = ?, type = ?, category = ?, tags = ?, file_path = ?, file_type = ?, description = ?, version = ?, folder_id = ?, updated_at = ?
      WHERE id = ?`
   ).run(name.trim(), type, normalizedCategory, tags, filePath, fileType, description, version, folder_id, now(), id);
+  if (req.file) removeFileByPath(existing.file_path);
 
   const row = db.prepare('SELECT * FROM icons WHERE id = ?').get(id);
   res.json(row);
@@ -687,7 +721,7 @@ app.patch('/api/icons/batch/folder', (req, res) => {
 
   const placeholders = ids.map(() => '?').join(',');
   const info = db
-    .prepare(`UPDATE icons SET folder_id = ?, updated_at = ? WHERE id IN (${placeholders})`)
+    .prepare(`UPDATE icons SET folder_id = ?, updated_at = ? WHERE deleted_at IS NULL AND id IN (${placeholders})`)
     .run(folderId, now(), ...ids);
 
   res.json({ success: true, updated: info.changes });
@@ -710,7 +744,7 @@ app.patch('/api/icons/batch/category', (req, res) => {
 
   const placeholders = ids.map(() => '?').join(',');
   const info = db
-    .prepare(`UPDATE icons SET category = ?, updated_at = ? WHERE id IN (${placeholders})`)
+    .prepare(`UPDATE icons SET category = ?, updated_at = ? WHERE deleted_at IS NULL AND id IN (${placeholders})`)
     .run(category, now(), ...ids);
 
   res.json({ success: true, updated: info.changes });
@@ -725,7 +759,7 @@ app.post('/api/icons/batch/download', (req, res) => {
 
   const placeholders = ids.map(() => '?').join(',');
   const rows = db
-    .prepare(`SELECT name, file_path FROM icons WHERE id IN (${placeholders})`)
+    .prepare(`SELECT name, file_path FROM icons WHERE deleted_at IS NULL AND id IN (${placeholders})`)
     .all(...ids);
 
   const zip = new AdmZip();
@@ -772,36 +806,24 @@ app.post('/api/icons/batch/download', (req, res) => {
   res.send(buffer);
 });
 
-// 批量删除图标（同时删除磁盘文件）
+// 批量移入回收站，保留文件供恢复。
 app.delete('/api/icons/batch', (req, res) => {
   const ids = normalizeIds(req.body.ids);
   if (!ids.length) {
     return res.status(400).json({ error: '请选择要删除的图标' });
   }
 
-  const placeholders = ids.map(() => '?').join(',');
-  const result = db.transaction(() => {
-    const rows = db.prepare(`SELECT file_path FROM icons WHERE id IN (${placeholders})`).all(...ids);
-    const info = db.prepare(`DELETE FROM icons WHERE id IN (${placeholders})`).run(...ids);
-    return { rows, deleted: info.changes };
-  })();
-
-  for (const row of result.rows) {
-    removeFileByPath(row.file_path);
-  }
-
-  res.json({ success: true, deleted: result.deleted });
+  res.json({ success: true, deleted: trash.move(ids) });
 });
 
-// 删除图标（同时删除磁盘文件）
+// 单个图标移入回收站。
 app.delete('/api/icons/:id', (req, res) => {
   const id = Number(req.params.id);
-  const existing = db.prepare('SELECT * FROM icons WHERE id = ?').get(id);
+  const existing = db.prepare('SELECT * FROM icons WHERE id = ? AND deleted_at IS NULL').get(id);
   if (!existing) {
     return res.status(404).json({ error: '图标不存在' });
   }
-  removeFileByPath(existing.file_path);
-  db.prepare('DELETE FROM icons WHERE id = ?').run(id);
+  trash.move([id]);
   res.json({ success: true });
 });
 
@@ -813,7 +835,7 @@ app.get('/api/categories', (req, res) => {
     .prepare(
       `SELECT c.id, c.name, COUNT(i.id) AS icon_count
          FROM categories c
-         LEFT JOIN icons i ON i.category = c.name
+         LEFT JOIN icons i ON i.category = c.name AND i.deleted_at IS NULL
         GROUP BY c.id
         ORDER BY c.name`
     )
@@ -854,7 +876,7 @@ app.put('/api/categories/:id', (req, res) => {
   try {
     db.transaction(() => {
       db.prepare('UPDATE categories SET name = ? WHERE id = ?').run(name, id);
-      db.prepare('UPDATE icons SET category = ?, updated_at = ? WHERE category = ?')
+      db.prepare('UPDATE icons SET category = ?, updated_at = ? WHERE category = ? AND deleted_at IS NULL')
         .run(name, now(), existing.name);
     })();
   } catch (err) {
@@ -872,7 +894,7 @@ app.delete('/api/categories/:id', (req, res) => {
   const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: '分类不存在' });
 
-  const inUse = db.prepare('SELECT COUNT(*) AS n FROM icons WHERE category = ?').get(existing.name).n;
+  const inUse = db.prepare('SELECT COUNT(*) AS n FROM icons WHERE category = ? AND deleted_at IS NULL').get(existing.name).n;
   if (inUse > 0) {
     return res.status(409).json({ error: `该分类下有 ${inUse} 个图标，无法删除` });
   }
@@ -883,7 +905,7 @@ app.delete('/api/categories/:id', (req, res) => {
 
 // 导出全部数据为 JSON
 app.get('/api/export', (req, res) => {
-  const rows = db.prepare('SELECT * FROM icons ORDER BY id').all();
+  const rows = db.prepare('SELECT * FROM icons WHERE deleted_at IS NULL ORDER BY id').all();
   const payload = {
     exported_at: now(),
     count: rows.length,
@@ -928,7 +950,7 @@ app.post('/api/import', (req, res) => {
     );
     let added = 0;
     let skipped = 0;
-    const findIcon = db.prepare('SELECT 1 FROM icons WHERE name = ? AND type = ? AND file_path = ?');
+    const findIcon = db.prepare('SELECT 1 FROM icons WHERE name = ? AND type = ? AND file_path = ? AND deleted_at IS NULL');
     for (const item of list) {
       if (!item) continue;
       const name = String(item.name || '').trim();
@@ -962,6 +984,54 @@ app.post('/api/import', (req, res) => {
   res.json({ success: true, ...result });
 });
 
+// 回收站接口独立于正常图库，避免筛选或分页影响清空范围。
+app.get('/api/trash', (req, res) => {
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const pageSize = [30, 50, 100, 200, 500].includes(Number(req.query.pageSize)) ? Number(req.query.pageSize) : 100;
+  const where = 'WHERE deleted_at IS NOT NULL AND name LIKE ?';
+  const keyword = `%${search}%`;
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM icons ${where}`).get(keyword).n;
+  const page = Math.min(Math.max(1, Math.ceil(total / pageSize)), Math.max(1, Number.isInteger(Number(req.query.page)) ? Number(req.query.page) : 1));
+  const icons = db.prepare(`SELECT * FROM icons ${where} ORDER BY deleted_at DESC, id DESC LIMIT ? OFFSET ?`).all(keyword, pageSize, (page - 1) * pageSize);
+  res.json({ icons, total, page, pageSize, trashTotal: trash.count(), retentionDays: trash.retentionDays() });
+});
+
+app.get('/api/trash/settings', (req, res) => {
+  res.json({ retentionDays: trash.retentionDays(), total: trash.count() });
+});
+
+app.put('/api/trash/settings', (req, res) => {
+  const days = req.body.retentionDays;
+  if (![7, 30, 60, 90].includes(days)) return res.status(400).json({ error: '保留期限仅支持 7、30、60、90 天' });
+  db.prepare("UPDATE app_settings SET value = ? WHERE key = 'trash_retention_days'").run(String(days));
+  res.json({ retentionDays: days });
+});
+
+app.post('/api/trash/restore', (req, res) => {
+  const ids = normalizeIds(req.body.ids);
+  if (!ids.length) return res.status(400).json({ error: '请选择要恢复的图标' });
+  res.json(trash.restore(ids));
+});
+
+app.delete('/api/trash', (req, res) => {
+  const ids = normalizeIds(req.body.ids);
+  if (!ids.length) return res.status(400).json({ error: '请选择要彻底删除的图标' });
+  res.json(trash.purge(ids));
+});
+
+app.post('/api/trash/empty', (req, res) => {
+  if (req.body.confirm !== '清空回收站') return res.status(400).json({ error: '请确认清空整个回收站' });
+  res.json(trash.purge(db.prepare('SELECT id FROM icons WHERE deleted_at IS NOT NULL').all().map((row) => row.id)));
+});
+
+function cleanupTrash() {
+  try { trash.cleanup(); }
+  catch (error) { console.error('回收站自动清理失败：', error.message); }
+}
+cleanupTrash();
+const trashCleanupTimer = setInterval(cleanupTrash, 60 * 60 * 1000);
+trashCleanupTimer.unref();
+
 // 统一错误处理：区分客户端错误（400）与服务端错误（500）
 app.use((err, req, res, next) => {
   console.error('请求出错:', err.stack || err.message);
@@ -976,5 +1046,6 @@ app.use((err, req, res, next) => {
 const server = app.listen(PORT, () => {
   console.log(`应用 icon 管理端已启动: http://localhost:${PORT}`);
 });
+server.on('close', () => clearInterval(trashCleanupTimer));
 
 module.exports = { app, server };

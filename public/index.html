@@ -30,18 +30,16 @@
       </div>
       <!-- 文件夹树由 app.js 的 renderFolderTree() 动态渲染 -->
       <ul id="folder-tree" class="folder-tree"></ul>
-      <button class="sidebar-cat-btn" id="btn-manage-cat" type="button">
-        <svg class="icon" viewBox="0 0 24 24"><path d="M9 5H2v7l6.29 6.29c.94.94 2.48.94 3.42 0l3.58-3.58c.94-.94.94-2.48 0-3.42L9 5Z"/><path d="M6 9.01V9"/><path d="m15 5 6.3 6.3a2.4 2.4 0 0 1 0 3.4L17 19"/></svg>
-        <span>分类管理</span>
-      </button>
+      <button id="open-trash" class="trash-entry" type="button" title="回收站"><span aria-hidden="true">♻️</span><span class="trash-entry-label">回收站 <b id="trash-count">0</b></span></button>
       <div class="sidebar-foot" id="sidebar-foot">
         <span class="sidebar-foot-icon"><svg class="icon" viewBox="0 0 24 24"><path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></svg></span>
         <span class="sidebar-foot-text">共 <b id="sidebar-total">0</b> 个图标</span>
       </div>
+      <div class="app-version" id="app-version" aria-label="软件版本">版本读取中…</div>
     </aside>
 
     <!-- 右侧内容区 -->
-    <div class="content">
+    <div class="content" id="library-content">
       <section class="toolbar">
         <div class="toolbar-row toolbar-row-main">
           <div class="search-box">
@@ -54,33 +52,54 @@
               <option value="app">图片</option>
               <option value="symbol">SVG</option>
             </select>
-            <select id="filter-category" class="select">
-              <option value="">全部分类</option>
-            </select>
+            <div class="category-controls">
+            <select id="filter-category" multiple aria-label="分类筛选"></select>
+      <button class="btn btn-ghost" id="btn-manage-cat" type="button">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M9 5H2v7l6.29 6.29c.94.94 2.48.94 3.42 0l3.58-3.58c.94-.94.94-2.48 0-3.42L9 5Z"/><path d="M6 9.01V9"/><path d="m15 5 6.3 6.3a2.4 2.4 0 0 1 0 3.4L17 19"/></svg>
+        <span>分类管理</span>
+      </button>
+            </div>
           </div>
           <div class="toolbar-btns">
             <button id="btn-batch" class="btn btn-ghost"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>批量上传</button>
             <button id="btn-zip" class="btn btn-ghost"><svg class="icon" viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>导入 ZIP</button>
-          </div>
           <button id="btn-add" class="btn btn-primary" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新增图标</button>
+          </div>
         </div>
         <div class="toolbar-row toolbar-row-batch">
           <div id="batch-actions" class="batch-actions">
             <span id="batch-selected-count" class="batch-selected-count">已选 0 个</span>
             <button id="btn-batch-toggle-all" class="btn btn-ghost" type="button">全选当前页</button>
-            <select id="batch-folder-select" class="select batch-folder-select">
-              <option value="">无文件夹</option>
+            <label for="batch-folder-select">移至文件夹</label>
+            <select id="batch-folder-select" class="select batch-folder-select" title="为勾选的图标选择迁移目标，不影响列表筛选">
+              <option value="">不归属任何文件夹</option>
             </select>
             <button id="btn-batch-move" class="btn btn-ghost" type="button">迁移</button>
             <button id="btn-batch-download" class="btn btn-ghost" type="button">批量下载</button>
             <button id="btn-batch-delete" class="btn btn-ghost btn-danger-soft" type="button">删除</button>
-            <button id="btn-batch-clear" class="btn btn-ghost" type="button">清空</button>
+            <button id="btn-batch-clear" class="btn btn-ghost" type="button" title="清空所有页面和筛选条件下的已选图标">清空已选</button>
           </div>
-          <div class="stat" id="stat"></div>
+          <div class="list-display-controls">
+            <label for="sort-order">排序</label>
+            <select id="sort-order" class="select" aria-label="图标排序">
+              <option value="grouped">最近上传</option>
+              <option value="name">名称升序</option>
+            </select>
+            <div class="stat" id="stat"></div>
+          </div>
         </div>
       </section>
 
       <!-- 拖拽感知容器 -->
+      <div id="filter-summary" class="filter-summary" hidden>
+        <span>当前筛选：</span>
+        <div id="filter-chips" class="filter-chips"></div>
+        <button id="clear-filters" class="btn btn-ghost" type="button">清除筛选</button>
+      </div>
+      <div id="list-status" class="list-status" role="status" hidden>
+        <span id="list-status-text"></span>
+        <button id="retry-icons" class="btn btn-ghost" type="button" hidden>重试</button>
+      </div>
       <div id="drop-zone" class="drop-zone">
         <div id="drop-hint" class="drop-hint" hidden>
           <div class="drop-hint-box">
@@ -89,7 +108,7 @@
           </div>
         </div>
         <main id="grid" class="grid"></main>
-        <div id="empty" class="empty" hidden>暂无图标，点击右上角「新增图标」或将图片拖拽至此开始。</div>
+        <div id="empty" class="empty" hidden><span id="empty-text"></span><button id="empty-clear-filters" class="btn btn-ghost" type="button" hidden>清除筛选</button></div>
       </div>
 
       <!-- 分页栏 -->
@@ -103,8 +122,10 @@
             每页
             <select id="page-size" class="select">
               <option value="30">30</option>
-              <option value="50" selected>50</option>
-              <option value="100">100</option>
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
             </select>
             条 · 共 <b id="page-total">0</b> 个
           </div>
@@ -116,6 +137,62 @@
         </nav>
       </footer>
     </div>
+    <section class="content trash-content" id="trash-content" hidden aria-label="回收站">
+      <div class="toolbar">
+        <div class="toolbar-row trash-heading">
+          <h2>回收站</h2>
+          <button id="trash-back" class="trash-back-link" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M5 12h14"/></svg>返回图库</button>
+        </div>
+        <div class="toolbar-row trash-filter-row">
+          <div class="search-box"><svg class="search-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><input id="trash-search" class="search" type="search" placeholder="搜索图标名称…" aria-label="搜索回收站" /></div>
+          <div class="trash-retention-group">
+            <label for="trash-retention">保留期限</label>
+            <select id="trash-retention" class="select"><option value="7">7 天</option><option value="30" selected>30 天</option><option value="60">60 天</option><option value="90">90 天</option></select>
+            <button id="trash-save-settings" class="btn btn-ghost" type="button">保存期限</button>
+            <span class="trash-help" title="保留期限对整个图库生效，仅影响之后删除的图标。服务启动时及每小时检查到期项。">仅对之后删除的图标生效</span>
+          </div>
+        </div>
+        <div id="trash-batch-bar" class="toolbar-row toolbar-row-batch">
+          <span id="trash-selected" class="batch-selected-count">已选 0 个</span>
+          <button id="trash-select-page" class="btn btn-ghost" type="button">全选当前页</button>
+          <button id="trash-restore" class="btn btn-primary" type="button" disabled>恢复所选</button>
+          <button id="trash-delete" class="btn btn-ghost btn-danger-soft" type="button" disabled>彻底删除所选</button>
+          <button id="trash-clear-selected" class="btn btn-ghost" type="button">清空已选</button>
+          <span class="trash-action-divider" aria-hidden="true"></span>
+          <button id="trash-empty" class="btn btn-ghost btn-danger-soft" type="button">清空回收站</button>
+          <span class="trash-selection-hint" title="点击空白处勾选，点击缩略图预览；翻页保留已选">跨页保留已选</span>
+        </div>
+      </div>
+      <div id="trash-status" class="list-status" role="status"></div>
+      <button id="trash-retry" class="btn btn-ghost" type="button" hidden>重试</button>
+      <div class="trash-results">
+        <div id="trash-empty-state" class="trash-empty-state" role="status" hidden>
+          <span class="trash-empty-symbol" aria-hidden="true">♻️</span>
+          <h3 id="trash-empty-title">回收站为空</h3>
+          <p id="trash-empty-description">删除的图标会暂存于此，可在到期前恢复。</p>
+          <button id="trash-clear-search" class="btn btn-ghost" type="button" hidden>清除搜索</button>
+        </div>
+        <div id="trash-list-head" class="trash-list-head" aria-hidden="true"><span>选择</span><span>预览</span><span>图标名称</span><span>原分类／文件夹</span><span>删除时间</span><span>剩余时间</span><span>操作</span></div>
+        <div id="trash-list" class="trash-list"></div>
+      </div>
+      <footer class="pagination" id="trash-pagination">
+        <div class="pagination-left">
+          <div class="view-toggle" role="group" aria-label="回收站展示方式">
+            <button id="trash-view-grid" class="view-btn" type="button" title="网格视图" aria-label="回收站网格视图"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
+            <button id="trash-view-list" class="view-btn active" type="button" title="列表视图" aria-label="回收站列表视图"><svg class="icon" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+          </div>
+          <div class="pagination-size">每页
+            <select id="trash-page-size" class="select" aria-label="回收站每页条数"><option value="30">30</option><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select>
+            条 · 共 <b id="trash-page-total">0</b> 个
+          </div>
+        </div>
+        <nav class="pagination-nav" aria-label="回收站分页导航">
+          <button id="trash-prev" class="pg-btn" type="button" title="上一页" aria-label="回收站上一页"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+          <div id="trash-page-numbers" class="page-numbers"></div>
+          <button id="trash-next" class="pg-btn" type="button" title="下一页" aria-label="回收站下一页"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+        </nav>
+      </footer>
+    </section>
   </div>
 
   <!-- 新增/编辑弹窗 -->
@@ -152,9 +229,9 @@
             </select>
           </div>
           <div class="form-row">
-            <label>分类</label>
+            <label>分类 <button type="button" class="inline-action" data-quick-category="f-category">＋ 新建分类</button></label>
             <select id="f-category">
-              <option value="">无分类</option>
+              <option value="">未分类</option>
             </select>
           </div>
         </div>
@@ -212,6 +289,21 @@
     </div>
   </div>
 
+  <div id="upload-options-modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head"><h2>批量上传</h2><button type="button" class="modal-close" id="upload-options-close" aria-label="关闭">×</button></div>
+      <div class="cat-modal-body">
+        <p id="upload-file-summary"></p>
+        <label for="upload-folder">统一放入文件夹</label>
+        <select id="upload-folder" class="select"></select>
+        <label for="upload-category">统一设置分类 <button type="button" class="inline-action" data-quick-category="upload-category">＋ 新建分类</button></label>
+        <select id="upload-category" class="select"></select>
+        <p class="category-help">所有文件使用相同分类；文件名作为图标名称。确认后才开始上传。</p>
+        <div class="upload-options-actions"><button type="button" class="btn btn-ghost" id="upload-options-cancel">取消</button><button type="button" class="btn btn-primary" id="upload-options-submit">开始上传</button></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 分类管理弹窗 -->
   <div id="category-modal" class="modal" hidden>
     <div class="modal-card cat-modal-card">
@@ -224,6 +316,9 @@
           <input id="cat-new-input" type="text" placeholder="输入新分类名称，如：极简报销" />
           <button type="button" class="btn btn-primary" id="cat-add-btn"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新增</button>
         </div>
+        <p class="category-help">每个图标归属一个分类。删除分类前，请先移出其中的图标。</p>
+        <input id="cat-search" class="select" type="search" placeholder="搜索分类名称" aria-label="搜索分类名称" />
+        <div class="category-table-head"><span>分类名称</span><span>图标数</span><span>操作</span></div>
         <ul id="category-list" class="category-list"></ul>
       </div>
     </div>
@@ -241,7 +336,7 @@
           <svg class="search-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <input id="picker-search" type="search" class="search" placeholder="搜索图标名称…" />
         </div>
-        <button type="button" class="btn btn-ghost btn-sm" id="picker-select-all">全选当前</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="picker-select-all">全选未选择</button>
       </div>
       <div id="picker-grid" class="picker-grid"></div>
       <div id="picker-empty" class="picker-empty" hidden>没有匹配的图标</div>
@@ -300,9 +395,21 @@
     </div>
   </div>
 
+  <dialog id="action-dialog" class="action-dialog" aria-labelledby="action-title" aria-describedby="action-description action-detail">
+    <form method="dialog" id="action-form">
+      <div class="modal-head"><h2 id="action-title"></h2><button id="action-close" class="modal-close" type="button" aria-label="关闭确认弹窗">×</button></div>
+      <div class="action-body">
+        <p id="action-description"></p>
+        <p id="action-detail" class="action-detail"></p>
+      </div>
+      <div class="action-footer"><button id="action-cancel" class="btn btn-ghost" type="button" autofocus>取消</button><button id="action-submit" class="btn btn-primary" type="submit"></button></div>
+    </form>
+  </dialog>
   <div id="toast" class="toast" hidden></div>
 
+  <script src="selection-controls.js"></script>
   <script src="app.js"></script>
+  <script src="trash.js"></script>
 </body>
 </html>
 

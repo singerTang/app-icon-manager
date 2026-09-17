@@ -1,11 +1,12 @@
 {
   "name": "app-icon-manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "应用 icon 管理端：管理应用图标与 SVG 符号库",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test:unit": "node --test test/api.test.js",
+    "test:trash": "node --test test/trash.test.js",
     "test:e2e": "npx playwright test",
     "cypress:open": "cypress open",
     "cypress:run": "cypress run",
